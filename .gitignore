@@ -1,0 +1,17 @@
+# Virtual environment
+venv/
+env/
+tf_env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Training Data (Excluded)
+My_Keypoint_Data/
+My_Word_Data/
+Labeled/
+
+# OS files
+.DS_Store
+Thumbs.db

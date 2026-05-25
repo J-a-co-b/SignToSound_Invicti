@@ -1,0 +1,177 @@
+================================================================================
+         SIGNTOSOUND — PROJECT STATUS & NEXT STEPS
+         Team Invicti | Updated: May 2026
+================================================================================
+
+
+1. WHAT WE HAVE ACHIEVED
+========================
+
+A. LETTER RECOGNITION MODEL (COMPLETE)
+   - Model: Deep Neural Network (DNN)
+   - Input: 63-dimension hand keypoints from MediaPipe
+   - Letters: 24 ASL letters (A through Y, excluding J and Z)
+   - Accuracy: ~100% on test set
+   - Files: sign_language_model.keras, scaler.pkl
+   - Training improvements applied:
+     * Data augmentation (jitter, scaling, rotation, mirroring)
+     * StandardScaler normalisation (consistent across train and inference)
+     * Class-balanced weighting
+     * Early stopping + learning rate scheduling + model checkpointing
+     * Increased batch size (64) for stable gradients
+
+B. WORD RECOGNITION MODEL (COMPLETE)
+   - Model: 1D Convolutional Neural Network (1D-CNN)
+   - Input: 30 frames × 150 dimensions (left hand + right hand + upper body pose)
+   - Words supported (15):
+     DRINK, EAT, EMERGENCY, HELLO, HELP, HOSPITAL,
+     MEDICINE, MORE, NO, PAIN, PLEASE, SICK,
+     THANK YOU, WANT, YES
+   - Accuracy: 100% on test set
+   - Files: word_model.keras, word_scaler.pkl, word_label_map.json
+   - Training data: 70 sequences extracted from 85 MP4 videos
+     (15 corrupted videos were skipped automatically)
+   - Augmentation: 6x per sample (time-reverse, speed jitter, noise, scaling)
+
+C. DATA PIPELINE (COMPLETE)
+   - preprocess.py: Extracts hand keypoints from images → .npy files
+   - preprocess_words.py: Extracts hand+pose keypoints from MP4 videos → .npy sequences
+   - My_Keypoint_Data/: Letter keypoint data (ready)
+   - My_Word_Data/: Word sequence data for all 15 classes (ready)
+
+D. DESKTOP GUI APPLICATION (COMPLETE)
+   - gui_app.py: Full CustomTkinter application
+   - Features:
+     * Live webcam feed with hand landmark overlay
+     * Real-time letter prediction with confidence display
+     * Sentence building (detected letters auto-append)
+     * Text-to-speech output (speaks detected letters and words)
+     * Trainer mode: select a target letter, see confidence progress bar
+     * ASL skeleton reference display in trainer panel
+     * Auto-speak toggle
+     * Streak counter for training motivation
+
+E. MODEL FILES ON HAND
+   - sign_language_model.keras    (letter DNN)
+   - word_model.keras             (word 1D-CNN)
+   - scaler.pkl                   (letter feature normaliser)
+   - word_scaler.pkl              (word feature normaliser)
+   - word_label_map.json          (word index-to-label mapping)
+   - hand_landmarker.task         (MediaPipe hand detection model)
+   - pose_landmarker.task         (MediaPipe pose detection model)
+
+
+2. WHAT NEEDS TO BE DONE NEXT
+==============================
+
+TRACK A — RASPBERRY PI EDUCATIONAL KIT
+---------------------------------------
+
+Step A1: Model Conversion (on desktop, ~1 hour)
+   - Run convert_to_tflite.py to produce:
+     * letter_model.tflite
+     * word_model.tflite
+     * Scaler arrays as .npy files
+   - Verify TFLite accuracy matches original Keras accuracy
+
+Step A2: Pi Hardware Setup (~1 day)
+   - Flash Raspberry Pi OS Lite (64-bit) to SD card
+   - Wire the 2.4" SPI TFT display to GPIO pins
+   - Configure fbtft kernel driver in /boot/config.txt
+   - Install dependencies: tflite-runtime, mediapipe, pygame, opencv, espeak
+   - Transfer model files to the Pi via SCP
+
+Step A3: Pi Application (~2-3 days)
+   - Build pi_app.py: lightweight Pygame app that runs on the TFT screen
+   - Letter mode: single-frame inference, hold-to-confirm
+   - Word mode: 30-frame buffered inference
+   - espeak TTS for audio output
+   - Target: 10 FPS on Pi 3 B+
+   - Set up systemd auto-start service
+
+TRACK B — WEB PLATFORM (BROWSER ACCESS)
+-----------------------------------------
+
+Step B1: Backend API (~2-3 days)
+   - Build FastAPI server (api/main.py)
+   - Endpoints:
+     * POST /predict/letter  (single JPEG → letter prediction)
+     * POST /predict/word    (30 JPEGs → word prediction)
+     * WebSocket /ws/live    (real-time streaming)
+   - Uses TFLite + MediaPipe for inference (same as Pi)
+
+Step B2: Frontend Web App (~3-4 days)
+   - React + Vite application
+   - Pages: Landing, Practice (main webcam+inference), Learn (ASL reference), About
+   - Features:
+     * Browser webcam access via getUserMedia
+     * WebSocket connection to backend for real-time predictions
+     * Live confidence bars and prediction display
+     * Sentence building + browser TTS (Web Speech API)
+     * Dark theme with modern design
+
+Step B3: Deployment (~1 day)
+   - Option 1: Pi serves API on local WiFi (classroom use, free)
+   - Option 2: Cloud VM (public access, ~$10-15/month)
+   - Frontend hosted on Vercel (free)
+
+
+3. TIMELINE ESTIMATE
+=====================
+
+   Week 1: Model conversion + Pi hardware setup
+   Week 2: Pi hardware testing + begin Pi app
+   Week 3: Complete Pi app + begin web backend
+   Week 4: Complete web backend + begin web frontend
+   Week 5: Complete web frontend + polish UI
+   Week 6: Integration testing + deployment + documentation
+
+
+4. DECISIONS NEEDED FROM THE TEAM
+==================================
+
+   Q1: Should the web platform backend run on the Pi (free, LAN only)
+       or on a cloud server (public access, monthly cost)?
+
+   Q2: Should the web platform have user accounts for tracking
+       learning progress, or stay anonymous?
+
+   Q3: Is upgrading from Pi 3 B+ to Pi 4 (2GB) feasible?
+       Pi 4 gives 2-3x better AI performance.
+
+
+5. HARDWARE SHOPPING LIST
+==========================
+
+   [  ] Raspberry Pi 3 B+ (with heatsink + fan)
+   [  ] MicroSD Card, 32GB or larger, Class 10
+   [  ] USB Webcam (any UVC-compatible, e.g. Logitech C270)
+   [  ] 2.4" SPI TFT Display (ILI9341 or ST7789)
+   [  ] Speaker or 3.5mm headphones
+   [  ] 5V 2.5A USB power supply
+   [  ] GPIO jumper wires (female-to-female)
+   [  ] Project enclosure / case
+
+
+6. KEY RISKS
+=============
+
+   - Pi 3 B+ has only 1GB RAM. Full TensorFlow will NOT fit.
+     Solution: Use tflite-runtime (already planned).
+
+   - Pi 3 B+ may only achieve ~5-10 FPS for AI inference.
+     Solution: Run camera at 320x240, target 10 FPS. For word mode,
+     can retrain on 10-frame sequences instead of 30 if needed.
+
+   - 15 corrupted MP4 files in the Labeled/ folder were skipped.
+     If more training data is needed, these files should be
+     re-downloaded or re-recorded.
+
+   - Word model trained on only 70 samples (augmented to ~490).
+     More video data per word class would improve real-world accuracy.
+
+
+================================================================================
+         See PLAN.md for the full detailed technical plan.
+         See README.md for project overview and setup instructions.
+================================================================================
