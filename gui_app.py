@@ -120,8 +120,13 @@ class SignLanguageApp:
         self.auto_speak_var = ctk.BooleanVar(value=False)
 
         # --- WORD MODE VARIABLES ---
-        self.word_frame_buffer = []
-        self.word_cooldown_until = 0
+        # Timed recording: collect ALL frames for RECORD_DURATION seconds,
+        # then evenly subsample to 30 — matching training's sample_frames() logic.
+        self.RECORD_DURATION   = 2.5   # seconds (match typical sign duration)
+        self.word_raw_buffer   = []    # stores ALL feature vecs during recording window
+        self.word_recording    = False # True while actively recording
+        self.word_record_start = 0.0   # time.time() when recording started
+        self.word_cooldown_until = 0.0
         self.last_word_prediction = ""
         self.last_word_confidence = 0.0
 
@@ -258,16 +263,20 @@ class SignLanguageApp:
         self.current_stable_letter = ""
 
         if new_mode == "WORD":
-            # Switch to word mode UI
-            self.letter_display.configure(text="—", text_color="#FF9F43")
-            self.conf_display.configure(text="Confidence: 0%")
+            # Reset all recording state
+            self.word_recording    = False
+            self.word_raw_buffer   = []
+            self.word_cooldown_until = 0
+            # Switch UI
+            self.letter_display.configure(text="—", text_color="#888888")
+            self.conf_display.configure(text="Confidence: —")
             self.stable_display.place_forget()
             self.word_mode_status.place(x=20, y=258)
-            self.word_mode_status.configure(text="Buffering: 0 / 30 frames")
+            self.word_mode_status.configure(text="Show your hands to start recording")
             self.word_progress.place(x=20, y=290)
             self.word_progress.set(0)
             self.word_info_label.configure(
-                text="🤟 WORD MODE — Sign full words (HELLO, HELP, YES, NO...)"
+                text=f"🤟 WORD MODE — Show hands, hold sign for {self.RECORD_DURATION:.0f}s, auto-predicts"
             )
         else:
             # Switch to letter mode UI
@@ -309,9 +318,11 @@ class SignLanguageApp:
     # Word mode: extract 150-dim feature vector from a frame
     # --------------------------------------------------
     def _extract_word_features(self, mp_image):
-        """Extract 150-dim hand+pose feature vector from a MediaPipe image."""
+        """Extract 150-dim hand+pose feature vector. Returns (vec, hand_detected)."""
         hand_result = self.hand_detector.detect(mp_image)
         pose_result = self.pose_detector.detect(mp_image)
+
+        hand_detected = bool(hand_result.hand_landmarks)
 
         # Hands: left (63) + right (63)
         slots = {0: np.zeros(63, dtype=np.float32),
@@ -335,7 +346,7 @@ class SignLanguageApp:
         else:
             pose_vec = np.zeros(24, dtype=np.float32)
 
-        return np.concatenate([hand_vec, pose_vec])  # (150,)
+        return np.concatenate([hand_vec, pose_vec]), hand_detected  # (150,), bool
 
     # --------------------------------------------------
     def update_video(self):
@@ -429,60 +440,114 @@ class SignLanguageApp:
 
     # --------------------------------------------------
     def _process_word_mode(self, mp_image):
-        """Buffer 30 frames → run word model → show prediction."""
+        """
+        Timed recording window approach — matches training preprocessing exactly.
+
+        Training (preprocess_words.py): reads ALL video frames, then evenly
+        subsamples to 30 using np.linspace across the full sign duration.
+
+        Real-time: collect ALL frames for RECORD_DURATION seconds (hands visible
+        OR not — the sign may end before hands drop), then evenly subsample to 30.
+        This ensures the temporal distribution matches training.
+        """
         now = time.time()
 
-        # During cooldown after a successful prediction, just show the result
+        # ── Cooldown: show result, wait before next recording ──────────────
         if now < self.word_cooldown_until:
             return
 
-        # Extract features and add to buffer
-        features = self._extract_word_features(mp_image)
-        self.word_frame_buffer.append(features)
+        # ── Not recording yet: wait for hand to appear, then auto-start ────
+        if not self.word_recording:
+            features, hand_detected = self._extract_word_features(mp_image)
+            if hand_detected:
+                # Hand appeared — start recording
+                self.word_recording    = True
+                self.word_record_start = now
+                self.word_raw_buffer   = [features]
+                elapsed = 0.0
+                self.word_progress.set(0)
+                self.word_mode_status.configure(
+                    text=f"🔴 Recording… 0.0 / {self.RECORD_DURATION:.1f}s")
+                self.letter_display.configure(text="…", text_color="#FF9F43")
+            else:
+                self.word_progress.set(0)
+                self.word_mode_status.configure(text="Show your hands to start recording")
+                self.letter_display.configure(text="—", text_color="#888888")
+                self.conf_display.configure(text="Confidence: —")
+            return
 
-        buffered = len(self.word_frame_buffer)
-        progress = min(1.0, buffered / WORD_FRAMES)
+        # ── Actively recording ─────────────────────────────────────────────
+        elapsed = now - self.word_record_start
+        progress = min(1.0, elapsed / self.RECORD_DURATION)
         self.word_progress.set(progress)
-        self.word_mode_status.configure(text=f"Buffering: {buffered} / {WORD_FRAMES} frames")
+        remaining = max(0.0, self.RECORD_DURATION - elapsed)
+        self.word_mode_status.configure(
+            text=f"🔴 Recording… {elapsed:.1f} / {self.RECORD_DURATION:.1f}s")
 
-        # Check if we have enough frames
-        if buffered >= WORD_FRAMES:
-            seq = np.array(self.word_frame_buffer[:WORD_FRAMES], dtype=np.float32)
-            self.word_frame_buffer.clear()
+        # Collect frame regardless of hand presence (sign may have just ended)
+        features, _ = self._extract_word_features(mp_image)
+        self.word_raw_buffer.append(features)
 
-            # Normalise using word scaler
+        # ── Recording window complete ──────────────────────────────────────
+        if elapsed >= self.RECORD_DURATION:
+            self.word_recording = False
+            raw = self.word_raw_buffer
+            self.word_raw_buffer = []
+
+            n_collected = len(raw)
+            if n_collected < 5:
+                self.letter_display.configure(text="?", text_color="#888888")
+                self.word_mode_status.configure(text="Too few frames — show hands and try again")
+                self.word_cooldown_until = now + 1.0
+                return
+
+            # ── Evenly subsample to WORD_FRAMES — identical to training ──
+            idxs = np.linspace(0, n_collected - 1, WORD_FRAMES, dtype=int)
+            seq  = np.array([raw[i] for i in idxs], dtype=np.float32)  # (30, 150)
+
+            # ── Normalise (same as training) ──────────────────────────────
             if self.word_scaler is not None:
-                flat = seq.reshape(1, -1)
-                flat = self.word_scaler.transform(flat)
-                seq = flat.reshape(1, WORD_FRAMES, 150)
+                flat = self.word_scaler.transform(seq.reshape(1, -1))
+                seq  = flat.reshape(1, WORD_FRAMES, 150)
             else:
                 seq = seq.reshape(1, WORD_FRAMES, 150)
 
-            # Predict
-            prediction = self.word_model.predict(seq, verbose=0)
-            probs = prediction[0]
-            class_id = int(np.argmax(probs))
+            # ── Predict ───────────────────────────────────────────────────
+            probs     = self.word_model.predict(seq, verbose=0)[0]
+            class_id  = int(np.argmax(probs))
             confidence = float(probs[class_id])
             word_label = self.word_labels[str(class_id)]
 
-            self.last_word_prediction = word_label
-            self.last_word_confidence = confidence
+            # Entropy guard: reject if model is spread across all classes
+            entropy     = -np.sum(probs * np.log(probs + 1e-9))
+            max_entropy = np.log(len(probs))
+            if entropy > 0.75 * max_entropy:
+                self.letter_display.configure(text="?", text_color="#888888")
+                self.conf_display.configure(text="Uncertain — try again")
+                self.word_mode_status.configure(text="Not recognised — sign more clearly")
+                self.word_cooldown_until = now + 1.5
+                return
 
-            # Update UI
-            self.letter_display.configure(text=word_label)
+            self.last_word_prediction  = word_label
+            self.last_word_confidence  = confidence
+
+            col = "#00FFCC" if confidence > 0.80 else "#FF9F43"
+            self.letter_display.configure(text=word_label, text_color=col)
             self.conf_display.configure(text=f"Confidence: {int(confidence * 100)}%")
-            self.word_mode_status.configure(text=f"Detected: {word_label}")
+            self.word_mode_status.configure(
+                text=f"✅ {word_label}  ({n_collected} frames collected)" if confidence > 0.80
+                     else f"⚠️  {word_label} — low confidence, try again"
+            )
             self.word_progress.set(1.0)
 
-            # Add to sentence if confidence is high enough
-            if confidence > 0.6:
+            if confidence > 0.80:
                 self.word += word_label + " "
                 self.word_display.configure(text=self.word)
                 if self.auto_speak_var.get():
                     self.speak_word(word_label)
 
-            # Cooldown: pause 2 seconds before buffering again
-            self.word_cooldown_until = now + 2.0
+            # Brief pause before next recording window opens
+            self.word_cooldown_until = now + 1.5
 
     # --------------------------------------------------
     def on_close(self):
