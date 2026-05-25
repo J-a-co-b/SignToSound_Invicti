@@ -7,10 +7,38 @@ tf_env/
 __pycache__/
 *.pyc
 
-# Training Data (Excluded)
+# Training data
 My_Keypoint_Data/
 My_Word_Data/
 Labeled/
+
+# Training scripts (not needed to run)
+train.py
+train_words.py
+preprocess.py
+preprocess_words.py
+check_data.py
+check_full_data.py
+realtime_test.py
+convert_to_tflite.py
+
+# Training output plots
+accuracy_curve.png
+loss_curve.png
+confusion_matrix.png
+word_accuracy_curve.png
+word_loss_curve.png
+word_confusion_matrix.png
+skeleton_preview.png
+
+# Pi / API deployment (not needed for desktop app)
+pi_app.py
+api/
+
+# Misc
+ghost_references.json
+PLAN.md
+PROJECT_STATUS.txt
 
 # OS files
 .DS_Store
