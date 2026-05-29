@@ -257,7 +257,7 @@ class SignLanguageApp:
 
     # --------------------------------------------------
     def _on_mode_change(self, new_mode):
-        self.word_frame_buffer.clear()
+        self.word_raw_buffer.clear()
         self.prediction_buffer.clear()
         self.stable_frames = 0
         self.current_stable_letter = ""
