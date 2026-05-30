@@ -60,11 +60,10 @@ class SignLanguageApp:
 
         # --- LOAD LETTER MODEL ---
         self.model = load_model("sign_language_model.keras")
-        self.DATA_PATH = os.path.join(os.getcwd(), "My_Keypoint_Data")
-        self.actions = np.array(sorted([
-            d for d in os.listdir(self.DATA_PATH)
-            if os.path.isdir(os.path.join(self.DATA_PATH, d)) and len(d) == 1 and d.isalpha()
-        ]))
+        # ASL alphabet — 24 static letters (J and Z excluded as they are dynamic)
+        self.actions = np.array(['A','B','C','D','E','F','G','H','I',
+                                  'K','L','M','N','O','P','Q','R','S',
+                                  'T','U','V','W','X','Y'])
 
         # --- LOAD WORD MODEL ---
         self.word_model = load_model("word_model.keras")
