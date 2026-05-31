@@ -1,0 +1,8 @@
+{
+  "emergency,hospital": "There is an emergency! Take me to the hospital.",
+  "sick,medicine": "I am feeling sick and I need medicine.",
+  "want,drink": "I want something to drink.",
+  "want,eat": "I want something to eat.",
+  "more,pain": "I am experiencing more pain.",
+  "help,pain": "Please help me, I am in pain."
+}

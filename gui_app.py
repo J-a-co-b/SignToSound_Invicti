@@ -1,3 +1,4 @@
+from grammar_engine import process_sentence
 import cv2
 import numpy as np
 import os
@@ -275,7 +276,7 @@ class SignLanguageApp:
                       command=self.delete_last, fg_color="#F39C12").place(relx=0.5, y=370, anchor=ctk.CENTER)
         ctk.CTkButton(self.info_frame, text="🗑️ Clear",
                       command=self.clear_word, fg_color="#E74C3C").place(relx=0.5, y=410, anchor=ctk.CENTER)
-        ctk.CTkButton(self.info_frame, text="🔊 Speak",
+        ctk.CTkButton(self.info_frame, text="🪄 Translate & Speak",
                       command=self.manual_speak, fg_color="#2ECC71").place(relx=0.5, y=450, anchor=ctk.CENTER)
 
         self.auto_speak_switch = ctk.CTkSwitch(self.info_frame, text="Auto-Speak",
@@ -360,7 +361,23 @@ class SignLanguageApp:
         self.word_display.configure(text="")
 
     def manual_speak(self):
-        self.speak_word(self.word)
+        if not self.word.strip():
+            return
+        
+        # 1. Split the raw string into tokens
+        raw_tokens = self.word.split()
+        
+        # 2. Pass the tokens through the offline grammar engine
+        corrected_sentence = process_sentence(raw_tokens)
+        
+        # 3. Update the UI display with the natural English sentence
+        self.word_display.configure(text=corrected_sentence)
+        
+        # 4. Speak the grammatically correct sentence
+        self.speak_word(corrected_sentence)
+        
+        # 5. Replace the raw buffer with the corrected sentence
+        self.word = corrected_sentence + " "
 
     # --------------------------------------------------
     # Word mode: extract 150-dim feature vector from a frame

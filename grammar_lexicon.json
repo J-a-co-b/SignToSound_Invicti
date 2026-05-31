@@ -1,0 +1,55 @@
+{
+  "me": "PRON",
+  "you": "PRON",
+  "we": "PRON",
+  "they": "PRON",
+  "them": "PRON",
+  "yourself": "PRON",
+  
+  "their": "PRON_POSS",
+  "your": "PRON_POSS",
+  
+  "drink": "VERB",
+  "eat": "VERB",
+  "help": "VERB",
+  "meet": "VERB",
+  "visit": "VERB",
+  "wait": "VERB",
+  "wear": "VERB",
+  "witness": "VERB",
+  "satisfy": "VERB",
+  
+  "want": "VERB_DESIRE",
+  
+  "emergency": "NOUN",
+  "hospital": "NOUN",
+  "medicine": "NOUN",
+  "pain": "NOUN",
+  "college": "NOUN",
+  "doctor": "NOUN",
+  "parents": "NOUN",
+  "war": "NOUN",
+  "way": "NOUN",
+  "week": "NOUN",
+  "wheelchair": "NOUN",
+  
+  "sick": "ADJ",
+  
+  "hello": "INTERJ",
+  "please": "INTERJ",
+  "thank you": "INTERJ",
+  "yes": "INTERJ",
+  "no": "INTERJ",
+  "wow": "INTERJ",
+  
+  "where": "QUESTION",
+  "which": "QUESTION",
+  "who": "QUESTION",
+  "why": "QUESTION",
+  
+  "on": "PREP",
+  "without": "PREP",
+  
+  "then": "ADV",
+  "more": "ADV"
+}
