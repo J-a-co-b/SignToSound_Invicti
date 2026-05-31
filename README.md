@@ -35,24 +35,29 @@ By utilizing Google MediaPipe for skeletal extraction and applying strict transl
 
 ---
 
-## 🤟 Recognized Words (24 Classes)
+## 🤟 Recognized Words (44 Classes)
 | | | | |
 |---|---|---|---|
 | DRINK | EAT | EMERGENCY | HELLO |
 | HELP | HOSPITAL | MEDICINE | MORE |
 | NO | PAIN | PLEASE | SICK |
-| THANK YOU | WANT | YES | doctor |
-| me | meet | on | they |
-| visit | we | you | your |
+| THANK YOU | WANT | YES | college |
+| doctor | me | meet | on |
+| parents | satisfy | their | them |
+| then | they | visit | wait |
+| war | way | we | wear |
+| week | wheelchair | where | which |
+| who | why | without | witness |
+| wow | you | your | yourself |
 
 ---
 
 ## 📊 Model Performance
 | Metric | Value |
 |--------|-------|
-| Word Model Accuracy | **99.4% val accuracy** |
+| Word Model Accuracy | **97.09% test accuracy** |
 | Word Model Parameters | **21,434** (~83 KB) |
-| TFLite Size (Pi) | **34.2 KB** |
+| TFLite Size (Pi) | **35.8 KB** |
 | Architecture | Separable 1D-CNN |
 | Letter Model | 4-layer DNN, ~60K params |
 | Hardware Target | CPU-only (Raspberry Pi 3B+ compatible) |
