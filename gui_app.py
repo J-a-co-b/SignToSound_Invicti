@@ -6,7 +6,8 @@ import time
 import platform
 import multiprocessing
 import pyttsx3
-from tensorflow.keras.models import load_model
+from tensorflow.keras.models import load_model, Sequential
+from tensorflow.keras.layers import Dense, BatchNormalization, Dropout
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import mediapipe as mp
@@ -59,7 +60,20 @@ class SignLanguageApp:
         self.proc.start()
 
         # --- LOAD LETTER MODEL ---
-        self.model = load_model("sign_language_model.keras")
+        # Rebuild architecture in code to avoid Keras version config issues.
+        # Weights are loaded separately — works on any TF/Keras version.
+        self.model = Sequential([
+            Dense(128, activation='relu', input_shape=(63,)),
+            BatchNormalization(momentum=0.99, epsilon=0.001),
+            Dropout(0.3),
+            Dense(64, activation='relu'),
+            BatchNormalization(momentum=0.99, epsilon=0.001),
+            Dropout(0.2),
+            Dense(32, activation='relu'),
+            Dense(24, activation='softmax'),
+        ])
+        self.model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+        self.model.load_weights('sign_language_model.weights.h5')
         # ASL alphabet — 24 static letters (J and Z excluded as they are dynamic)
         self.actions = np.array(['A','B','C','D','E','F','G','H','I',
                                   'K','L','M','N','O','P','Q','R','S',
