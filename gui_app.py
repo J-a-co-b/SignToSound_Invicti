@@ -6,8 +6,12 @@ import time
 import platform
 import multiprocessing
 import pyttsx3
-from tensorflow.keras.models import load_model, Sequential
-from tensorflow.keras.layers import Dense, BatchNormalization, Dropout
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import (
+    Input, Dense, BatchNormalization, Dropout, Activation,
+    SeparableConv1D, GlobalAveragePooling1D
+)
+from tensorflow.keras.regularizers import l2
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import mediapipe as mp
@@ -80,10 +84,41 @@ class SignLanguageApp:
                                   'T','U','V','W','X','Y'])
 
         # --- LOAD WORD MODEL ---
-        self.word_model = load_model("word_model.keras")
+        # Rebuild Separable 1D-CNN architecture in code — avoids renorm/version issues.
         with open("word_label_map.json") as f:
             self.word_labels = json.load(f)  # {"0": "DRINK", ...}
         self.word_list = [self.word_labels[str(i)] for i in range(len(self.word_labels))]
+        n_classes = len(self.word_labels)
+
+        inp = Input(shape=(WORD_FRAMES, 150), name="landmarks")
+        x = SeparableConv1D(64, kernel_size=3, padding="same",
+                            depthwise_regularizer=l2(1e-4),
+                            pointwise_regularizer=l2(1e-4),
+                            name="sep_conv1")(inp)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+        x = Dropout(0.25)(x)
+        x = SeparableConv1D(64, kernel_size=5, padding="same",
+                            depthwise_regularizer=l2(1e-4),
+                            pointwise_regularizer=l2(1e-4),
+                            name="sep_conv2")(x)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+        x = Dropout(0.25)(x)
+        x = SeparableConv1D(32, kernel_size=7, padding="same",
+                            depthwise_regularizer=l2(1e-4),
+                            pointwise_regularizer=l2(1e-4),
+                            name="sep_conv3")(x)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+        x = Dropout(0.20)(x)
+        x = GlobalAveragePooling1D()(x)
+        x = Dense(64, activation="relu", kernel_regularizer=l2(1e-4))(x)
+        x = Dropout(0.25)(x)
+        out = Dense(n_classes, activation="softmax", name="predictions")(x)
+        self.word_model = Model(inp, out, name="SignToSound_Word")
+        self.word_model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
+        self.word_model.load_weights("word_model.weights.h5")
 
         # --- LOAD SCALERS ---
         scaler_path = os.path.join(os.getcwd(), "scaler.pkl")
