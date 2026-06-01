@@ -938,6 +938,18 @@
             confidence: 0
         };
 
+        /**
+         * Returns true only when the page is being served from the local
+         * Python desktop server (http://localhost or http://127.0.0.1).
+         * When hosted online (HTTPS), this will be false, and all localhost
+         * fetch calls are skipped to avoid mixed-content errors and to prevent
+         * the browser from even attempting to reach the user's machine.
+         */
+        function isRunningLocally() {
+            const h = window.location.hostname;
+            return h === 'localhost' || h === '127.0.0.1';
+        }
+
         // Initialize App
         window.addEventListener("DOMContentLoaded", () => {
             // Load text from URL query parameter if present
@@ -1001,23 +1013,28 @@
         }
 
         async function checkConfiguration() {
-            // 1. First query local python server to see if GEMINI_API_KEY environment variable is set
-            try {
-                const response = await fetch("/api/config");
-                if (response.ok) {
-                    const data = await response.json();
-                    if (data.apiKey) {
-                        apiConfig.apiKey = data.apiKey;
-                        apiConfig.source = "env";
-                        setApiStatus(true, "System Key Connected (Desktop Env)");
-                        return;
+            // 1. Only attempt the local server fetch if we are actually running locally.
+            //    When hosted on HTTPS, browsers block HTTP localhost requests (mixed content).
+            //    We skip the fetch entirely to avoid console errors and security warnings.
+            if (isRunningLocally()) {
+                try {
+                    const response = await fetch("/api/config");
+                    if (response.ok) {
+                        const data = await response.json();
+                        if (data.apiKey) {
+                            apiConfig.apiKey = data.apiKey;
+                            apiConfig.source = "env";
+                            setApiStatus(true, "System Key Connected (Desktop Env)");
+                            return;
+                        }
                     }
+                } catch (err) {
+                    // Server not responding — fall through to localStorage check
                 }
-            } catch (err) {
-                console.log("Local API key fetch unavailable, checking localStorage...");
             }
 
-            // 2. Check localStorage if python server has no key or is offline
+            // 2. Check localStorage — this is the only path available when hosted online.
+            //    The key is stored only in the user's own browser and never sent to our servers.
             const localKey = localStorage.getItem("gemini_api_key");
             if (localKey) {
                 apiConfig.apiKey = localKey;
@@ -1209,6 +1226,14 @@ Respond ONLY with this JSON object. Do not include markdown code block formattin
         // Send corrected text back to the desktop application local server
         async function syncToDesktopApp() {
             if (!translationResult.corrected) return;
+
+            // The sync feature requires the desktop app's local server.
+            // It is not available when this page is hosted online.
+            if (!isRunningLocally()) {
+                showToast("Sync only works when opened from the desktop app.", "error");
+                return;
+            }
+
             btnSync.disabled = true;
             btnSync.textContent = "Syncing...";
 
@@ -1265,14 +1290,28 @@ Respond ONLY with this JSON object. Do not include markdown code block formattin
             history.forEach(item => {
                 const div = document.createElement("div");
                 div.className = "history-item";
-                div.innerHTML = `
-                    <div class="history-item-top">
-                        <span>ASL Gesture Capture</span>
-                        <span>${item.timestamp}</span>
-                    </div>
-                    <div class="history-item-raw">${item.raw}</div>
-                    <div class="history-item-fixed">${item.fixed}</div>
-                `;
+
+                // Use textContent (not innerHTML) for user-generated content to prevent XSS
+                const topDiv = document.createElement("div");
+                topDiv.className = "history-item-top";
+                const labelSpan = document.createElement("span");
+                labelSpan.textContent = "ASL Gesture Capture";
+                const timeSpan = document.createElement("span");
+                timeSpan.textContent = item.timestamp;
+                topDiv.appendChild(labelSpan);
+                topDiv.appendChild(timeSpan);
+
+                const rawDiv = document.createElement("div");
+                rawDiv.className = "history-item-raw";
+                rawDiv.textContent = item.raw;
+
+                const fixedDiv = document.createElement("div");
+                fixedDiv.className = "history-item-fixed";
+                fixedDiv.textContent = item.fixed;
+
+                div.appendChild(topDiv);
+                div.appendChild(rawDiv);
+                div.appendChild(fixedDiv);
 
                 div.addEventListener("click", () => {
                     aslInput.value = item.raw;
@@ -1282,7 +1321,10 @@ Respond ONLY with this JSON object. Do not include markdown code block formattin
                     translationResult.corrections = [];
                     translationResult.confidence = 100;
 
-                    aiOutput.innerHTML = `<span>${item.fixed}</span>`;
+                    const restoredSpan = document.createElement("span");
+                    restoredSpan.textContent = item.fixed;
+                    aiOutput.innerHTML = "";
+                    aiOutput.appendChild(restoredSpan);
                     confidenceBadge.style.display = "none";
                     correctionsContainer.innerHTML = '<div class="no-data">Restored historical translation. Click "Enhance" to re-generate insights.</div>';
 

@@ -59,30 +59,57 @@ def tts_worker(conn):
 # 1.5. LOCAL WEB SERVER HANDLER FOR ONLINE AI
 # ==================================================
 class LocalHTTPServer(BaseHTTPRequestHandler):
+    """Secure local server — bound to 127.0.0.1 only, no CORS headers.
+    
+    SECURITY NOTES:
+    - No Access-Control-Allow-Origin headers are set. This prevents any external
+      website from making cross-origin requests to this server via a browser.
+    - All API endpoints are served from the same origin (localhost:5892), so the
+      locally-served index.html does not need CORS to call them.
+    - /api/receive validates the Origin header to prevent cross-site text injection.
+    - The server binds to 127.0.0.1 (loopback), not 0.0.0.0, so it is invisible
+      to other devices on the local network.
+    """
+
+    _ALLOWED_ORIGIN = "http://localhost:5892"
+
     def log_message(self, format, *args):
-        pass
+        pass  # Suppress request logs
+
+    def _is_local_origin(self):
+        """Returns True only if the request originates from our own local server."""
+        origin = self.headers.get("Origin", "")
+        referer = self.headers.get("Referer", "")
+        # Allow requests with no origin (same-tab navigation, direct browser bar)
+        if not origin and not referer:
+            return True
+        return origin.startswith(self._ALLOWED_ORIGIN) or referer.startswith(self._ALLOWED_ORIGIN)
 
     def do_GET(self):
         parsed_url = urlparse(self.path)
         path = parsed_url.path
 
         if path == "/" or path == "/index.html":
-            self.send_response(200)
-            self.send_header("Content-type", "text/html; charset=utf-8")
-            self.end_headers()
-            
             html_path = os.path.join(APP_DIR, "online_mode", "index.html")
             try:
                 with open(html_path, "r", encoding="utf-8") as f:
                     content = f.read()
+                self.send_response(200)
+                self.send_header("Content-type", "text/html; charset=utf-8")
+                # Harden browser security for the served page
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("X-Frame-Options", "DENY")
+                self.end_headers()
                 self.wfile.write(content.encode("utf-8"))
             except Exception as e:
+                self.send_response(500)
+                self.end_headers()
                 self.wfile.write(f"Error loading index.html: {e}".encode("utf-8"))
 
         elif path == "/api/current":
+            # No CORS header — only accessible from same origin (our served page)
             self.send_response(200)
             self.send_header("Content-type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             current_text = ""
             app_instance = getattr(self.server, "app_instance", None)
@@ -92,23 +119,33 @@ class LocalHTTPServer(BaseHTTPRequestHandler):
             self.wfile.write(response.encode("utf-8"))
 
         elif path == "/api/config":
+            # No CORS header — API key is only served to our own local page.
+            # Any external site that tries to fetch this will be blocked by the browser
+            # because we do not grant cross-origin access.
             self.send_response(200)
             self.send_header("Content-type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             api_key = os.environ.get("GEMINI_API_KEY", "")
             response = json.dumps({"apiKey": api_key})
             self.wfile.write(response.encode("utf-8"))
 
         elif path == "/api/receive":
+            # Validate origin before allowing text injection into the desktop app.
+            if not self._is_local_origin():
+                self.send_response(403)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error": "Forbidden: cross-origin request rejected"}')
+                return
             query = parse_qs(parsed_url.query)
             text = query.get("text", [""])[0]
+            # Sanitise: strip and limit length
+            text = text.strip()[:500]
             app_instance = getattr(self.server, "app_instance", None)
             if app_instance:
                 app_instance.update_text_from_web(text)
             self.send_response(200)
             self.send_header("Content-type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(b'{"status": "success"}')
         else:
@@ -692,7 +729,9 @@ class SignLanguageApp:
     def start_local_web_server(self):
         def run():
             try:
-                self.web_server = HTTPServer(('localhost', 5892), LocalHTTPServer)
+                # Bind to 127.0.0.1 (loopback only) — NOT 0.0.0.0.
+                # This ensures the server is invisible to other devices on the LAN.
+                self.web_server = HTTPServer(('127.0.0.1', 5892), LocalHTTPServer)
                 self.web_server.app_instance = self
                 self.web_server.serve_forever()
             except Exception as e:
