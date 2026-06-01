@@ -1,0 +1,1325 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SignToSound — Online AI Grammar Correction</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet">
+
+    <style>
+        :root {
+            --bg-gradient: linear-gradient(135deg, #0f172a 0%, #020617 100%);
+            --card-bg: rgba(30, 41, 59, 0.45);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+
+            --primary: #6366f1;
+            /* Indigo */
+            --primary-hover: #4f46e5;
+            --secondary: #a855f7;
+            /* Purple */
+            --accent: #06b6d4;
+            /* Cyan */
+            --success: #10b981;
+            /* Emerald */
+            --warning: #f59e0b;
+            /* Amber */
+            --error: #ef4444;
+            /* Rose */
+
+            --glow-primary: rgba(99, 102, 241, 0.35);
+            --glow-secondary: rgba(168, 85, 247, 0.35);
+
+            --radius-lg: 16px;
+            --radius-md: 12px;
+            --radius-sm: 8px;
+
+            --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg-gradient);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        /* Animated Mesh Background Sparks */
+        body::before {
+            content: '';
+            position: absolute;
+            width: 400px;
+            height: 400px;
+            background: radial-gradient(circle, var(--glow-primary) 0%, transparent 70%);
+            top: -100px;
+            left: -100px;
+            z-index: 0;
+            pointer-events: none;
+            filter: blur(40px);
+        }
+
+        body::after {
+            content: '';
+            position: absolute;
+            width: 450px;
+            height: 450px;
+            background: radial-gradient(circle, var(--glow-secondary) 0%, transparent 70%);
+            bottom: -150px;
+            right: -150px;
+            z-index: 0;
+            pointer-events: none;
+            filter: blur(50px);
+        }
+
+        /* Top Header */
+        header {
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px 32px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 10;
+        }
+
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-section svg {
+            width: 32px;
+            height: 32px;
+            fill: url(#logo-grad);
+        }
+
+        .logo-title {
+            font-family: 'Outfit', sans-serif;
+            font-size: 24px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            background: linear-gradient(135deg, #a5b4fc 0%, #c084fc 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .badge {
+            background: rgba(99, 102, 241, 0.15);
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            color: #a5b4fc;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-left: 8px;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .btn-icon {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--card-border);
+            color: var(--text-primary);
+            width: 42px;
+            height: 42px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: var(--transition-smooth);
+        }
+
+        .btn-icon:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.2);
+            transform: translateY(-2px);
+        }
+
+        /* Status Pill */
+        .api-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 14px;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--card-border);
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--error);
+            box-shadow: 0 0 8px var(--error);
+        }
+
+        .status-dot.active {
+            background-color: var(--success);
+            box-shadow: 0 0 8px var(--success);
+        }
+
+        /* Main Content Grid */
+        main {
+            flex: 1;
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 32px 48px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 28px;
+            z-index: 10;
+        }
+
+        @media (max-width: 900px) {
+            main {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-radius: var(--radius-lg);
+            padding: 28px;
+            display: flex;
+            flex-direction: column;
+            transition: var(--transition-smooth);
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 10px 30px -15px rgba(0, 0, 0, 0.3);
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.15), transparent);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 18px;
+        }
+
+        .card-title {
+            font-family: 'Outfit', sans-serif;
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .card-subtitle {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .word-count {
+            font-size: 12px;
+            color: var(--text-muted);
+            background: rgba(255, 255, 255, 0.03);
+            padding: 2px 8px;
+            border-radius: 12px;
+        }
+
+        /* Textareas */
+        .text-container {
+            position: relative;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 180px;
+        }
+
+        textarea {
+            width: 100%;
+            flex: 1;
+            background: rgba(15, 23, 42, 0.4);
+            border: 1px solid var(--card-border);
+            border-radius: var(--radius-md);
+            padding: 16px;
+            color: var(--text-primary);
+            font-family: 'Inter', sans-serif;
+            font-size: 16px;
+            line-height: 1.6;
+            resize: none;
+            outline: none;
+            transition: var(--transition-smooth);
+        }
+
+        textarea:focus {
+            border-color: rgba(99, 102, 241, 0.5);
+            box-shadow: 0 0 15px rgba(99, 102, 241, 0.15);
+            background: rgba(15, 23, 42, 0.6);
+        }
+
+        textarea::placeholder {
+            color: var(--text-muted);
+        }
+
+        /* Large Action Button */
+        .action-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 16px 0;
+        }
+
+        .btn-translate {
+            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 50%, #ec4899 100%);
+            border: none;
+            color: white;
+            font-family: 'Outfit', sans-serif;
+            font-size: 18px;
+            font-weight: 600;
+            padding: 16px 36px;
+            border-radius: 30px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+            transition: var(--transition-smooth);
+            position: relative;
+            z-index: 1;
+        }
+
+        .btn-translate:hover {
+            transform: translateY(-2px) scale(1.02);
+            box-shadow: 0 8px 30px rgba(99, 102, 241, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.2) inset;
+        }
+
+        .btn-translate:active {
+            transform: translateY(1px);
+        }
+
+        .btn-translate::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border-radius: 30px;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 50%, #ec4899 100%);
+            filter: blur(10px);
+            z-index: -1;
+            opacity: 0.6;
+            transition: var(--transition-smooth);
+        }
+
+        .btn-translate:hover::after {
+            filter: blur(18px);
+            opacity: 0.9;
+        }
+
+        .btn-translate:disabled {
+            background: var(--text-muted);
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .btn-translate:disabled::after {
+            display: none;
+        }
+
+        /* Outputs Panel (Right Card) */
+        .output-wrapper {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+
+        .output-box {
+            width: 100%;
+            flex: 1;
+            background: rgba(15, 23, 42, 0.3);
+            border: 1px solid var(--card-border);
+            border-radius: var(--radius-md);
+            padding: 20px;
+            color: #ffd700;
+            /* Gold text */
+            font-size: 20px;
+            font-weight: 600;
+            line-height: 1.6;
+            min-height: 140px;
+            display: flex;
+            align-items: center;
+            position: relative;
+            overflow-y: auto;
+        }
+
+        .output-placeholder {
+            color: var(--text-muted);
+            font-size: 15px;
+            font-weight: 400;
+            font-style: italic;
+        }
+
+        .output-actions {
+            display: flex;
+            gap: 12px;
+            margin-top: 18px;
+        }
+
+        .btn {
+            padding: 10px 18px;
+            border-radius: var(--radius-sm);
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: var(--transition-smooth);
+            border: 1px solid transparent;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: var(--primary-hover);
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: var(--card-border);
+            color: var(--text-primary);
+        }
+
+        .btn-secondary:hover:not(:disabled) {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Equalizer Animation (TTS Feedback) */
+        .audio-wave {
+            display: none;
+            align-items: flex-end;
+            gap: 3px;
+            height: 20px;
+            margin-left: 8px;
+        }
+
+        .audio-wave.active {
+            display: flex;
+        }
+
+        .bar {
+            width: 3px;
+            height: 2px;
+            background-color: var(--accent);
+            border-radius: 3px;
+            animation: bounce 0.8s ease-in-out infinite alternate;
+        }
+
+        .bar:nth-child(2) {
+            animation-delay: 0.15s;
+        }
+
+        .bar:nth-child(3) {
+            animation-delay: 0.3s;
+        }
+
+        .bar:nth-child(4) {
+            animation-delay: 0.45s;
+        }
+
+        .bar:nth-child(5) {
+            animation-delay: 0.05s;
+        }
+
+        @keyframes bounce {
+            10% {
+                height: 4px;
+            }
+
+            100% {
+                height: 18px;
+            }
+        }
+
+        /* Bottom Details & Insights */
+        .insights-section {
+            grid-column: 1 / -1;
+            display: grid;
+            grid-template-columns: 1.5fr 1fr;
+            gap: 28px;
+        }
+
+        @media (max-width: 900px) {
+            .insights-section {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .corrections-list {
+            margin-top: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .correction-item {
+            background: rgba(15, 23, 42, 0.3);
+            border: 1px solid var(--card-border);
+            padding: 12px 16px;
+            border-radius: var(--radius-sm);
+            font-size: 14px;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+        }
+
+        .correction-item svg {
+            flex-shrink: 0;
+            width: 16px;
+            height: 16px;
+            margin-top: 2px;
+            fill: var(--accent);
+        }
+
+        .history-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-height: 250px;
+            overflow-y: auto;
+            margin-top: 12px;
+        }
+
+        .history-item {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--card-border);
+            padding: 12px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            transition: var(--transition-smooth);
+            font-size: 13px;
+        }
+
+        .history-item:hover {
+            background: rgba(255, 255, 255, 0.06);
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .history-item-top {
+            display: flex;
+            justify-content: space-between;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            font-size: 11px;
+        }
+
+        .history-item-raw {
+            color: var(--text-secondary);
+            text-decoration: line-through;
+            margin-bottom: 4px;
+        }
+
+        .history-item-fixed {
+            color: #ffd700;
+            font-weight: 500;
+        }
+
+        .no-data {
+            color: var(--text-muted);
+            font-style: italic;
+            font-size: 14px;
+            text-align: center;
+            padding: 24px;
+        }
+
+        /* Config Modal Overlay */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(2, 6, 23, 0.8);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            z-index: 100;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+            opacity: 1;
+        }
+
+        .modal-card {
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            border-radius: var(--radius-lg);
+            width: 90%;
+            max-width: 500px;
+            padding: 32px;
+            transform: translateY(20px);
+            transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .modal-overlay.active .modal-card {
+            transform: translateY(0);
+        }
+
+        .modal-title {
+            font-family: 'Outfit', sans-serif;
+            font-size: 22px;
+            font-weight: 700;
+            margin-bottom: 12px;
+        }
+
+        .modal-description {
+            font-size: 14px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            margin-bottom: 24px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+        }
+
+        .form-group input {
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--card-border);
+            border-radius: var(--radius-sm);
+            padding: 12px 16px;
+            color: var(--text-primary);
+            font-size: 15px;
+            outline: none;
+            transition: var(--transition-smooth);
+        }
+
+        .form-group input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 10px rgba(99, 102, 241, 0.2);
+        }
+
+        .modal-buttons {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+
+        /* Toast Notifications */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: rgba(30, 41, 59, 0.9);
+            border: 1px solid var(--success);
+            color: var(--text-primary);
+            padding: 14px 24px;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            z-index: 1000;
+            font-size: 14px;
+        }
+
+        .toast.error {
+            border-color: var(--error);
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        /* SVG definitions */
+        svg.icon-inline {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            stroke-width: 2;
+            stroke: currentColor;
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            vertical-align: middle;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- Logo Gradients -->
+    <svg style="width:0;height:0;position:absolute;" aria-hidden="true" focusable="false">
+        <linearGradient id="logo-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#6366f1" />
+            <stop offset="100%" stop-color="#a855f7" />
+        </linearGradient>
+    </svg>
+
+    <header>
+        <div class="logo-section">
+            <!-- Sparkles/Wave logo icon -->
+            <svg viewBox="0 0 24 24">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="url(#logo-grad)"
+                    stroke-width="2" fill="none" />
+            </svg>
+            <span class="logo-title">SignToSound</span>
+            <span class="badge">Gemini Cloud AI</span>
+        </div>
+        <div class="header-actions">
+            <div class="api-status">
+                <span class="status-dot" id="status-dot"></span>
+                <span id="status-text">Checking Configuration...</span>
+            </div>
+            <button class="btn-icon" id="btn-settings" title="Settings">
+                <svg class="icon-inline" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="3"></circle>
+                    <path
+                        d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z">
+                    </path>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <main>
+        <!-- Input Panel (Left) -->
+        <section class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <svg class="icon-inline" viewBox="0 0 24 24" style="stroke:var(--primary);">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                    </svg>
+                    ASL Gesture Tokens
+                </div>
+                <span class="word-count" id="input-word-count">0 words</span>
+            </div>
+            <div class="text-container">
+                <textarea id="asl-input"
+                    placeholder="Detected sign words will appear here. You can also manually type and edit them..."></textarea>
+            </div>
+            <div class="action-container">
+                <button class="btn-translate" id="btn-run-ai">
+                    <span>✨ Enhance with Gemini AI</span>
+                </button>
+            </div>
+        </section>
+
+        <!-- Output Panel (Right) -->
+        <section class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <svg class="icon-inline" viewBox="0 0 24 24" style="stroke:#ffd700;">
+                        <polygon
+                            points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2">
+                        </polygon>
+                    </svg>
+                    AI Grammatically Corrected Sentence
+                </div>
+                <div class="card-subtitle" id="confidence-badge" style="display:none;">
+                    Accuracy Constraint: <span id="confidence-val"
+                        style="color:var(--accent); font-weight:600;">0%</span>
+                </div>
+            </div>
+
+            <div class="output-wrapper">
+                <div class="output-box" id="ai-output">
+                    <span class="output-placeholder">Corrected, natural English sentence will be generated
+                        here...</span>
+                </div>
+
+                <div class="output-actions">
+                    <button class="btn btn-primary" id="btn-sync" disabled>
+                        <svg class="icon-inline" viewBox="0 0 24 24">
+                            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
+                        </svg>
+                        Sync to Desktop App
+                    </button>
+                    <button class="btn btn-secondary" id="btn-speak" disabled>
+                        <svg class="icon-inline" viewBox="0 0 24 24">
+                            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                            <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                        </svg>
+                        <span>Speak</span>
+                        <div class="audio-wave" id="speak-equalizer">
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                        </div>
+                    </button>
+                    <button class="btn btn-secondary" id="btn-copy" disabled>
+                        <svg class="icon-inline" viewBox="0 0 24 24">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                        Copy
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Insights Panel (Bottom Grid Column 1) -->
+        <section class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <svg class="icon-inline" viewBox="0 0 24 24" style="stroke:var(--accent);">
+                        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                        <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+                    </svg>
+                    AI Grammar Insights
+                </div>
+            </div>
+            <div class="corrections-list" id="corrections-container">
+                <div class="no-data" id="insights-no-data">Run translation to view the grammatical rules applied by the
+                    AI.</div>
+            </div>
+        </section>
+
+        <!-- Translation History (Bottom Grid Column 2) -->
+        <section class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <svg class="icon-inline" viewBox="0 0 24 24" style="stroke:var(--warning);">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <polyline points="12 6 12 12 16 14"></polyline>
+                    </svg>
+                    Correction History
+                </div>
+                <button class="btn btn-secondary" id="btn-clear-history" style="padding: 4px 8px; font-size:11px;">Clear
+                    All</button>
+            </div>
+            <div class="history-list" id="history-container">
+                <div class="no-data">No history items found.</div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Config Modal -->
+    <div class="modal-overlay" id="settings-modal">
+        <div class="modal-card">
+            <h3 class="modal-title">Cloud AI Configuration</h3>
+            <p class="modal-description">This application uses Google Gemini Flash model to analyze and structure sign
+                gestures into perfect grammar. Input your Gemini API key below.</p>
+
+            <div class="form-group">
+                <label for="input-api-key">Gemini API Key</label>
+                <input type="password" id="input-api-key" placeholder="AIzaSy...">
+                <small style="color:var(--text-muted); font-size:11px; margin-top:4px; line-height:1.4;">
+                    Your key is saved locally in your browser (localStorage). Get a free key from the <a
+                        href="https://aistudio.google.com/" target="_blank"
+                        style="color:var(--primary); text-decoration:none;">Google AI Studio</a>.
+                </small>
+            </div>
+
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" id="btn-close-settings">Cancel</button>
+                <button class="btn btn-primary" id="btn-save-settings">Save Config</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast message -->
+    <div class="toast" id="toast-message">
+        <svg class="icon-inline" viewBox="0 0 24 24" style="stroke:var(--success);">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+            <polyline points="22 4 12 14.01 9 11.01"></polyline>
+        </svg>
+        <span id="toast-text">Synchronization successful!</span>
+    </div>
+
+    <script>
+        // DOM Elements
+        const aslInput = document.getElementById("asl-input");
+        const aiOutput = document.getElementById("ai-output");
+        const btnRunAi = document.getElementById("btn-run-ai");
+        const btnSync = document.getElementById("btn-sync");
+        const btnSpeak = document.getElementById("btn-speak");
+        const btnCopy = document.getElementById("btn-copy");
+        const inputWordCount = document.getElementById("input-word-count");
+
+        const statusDot = document.getElementById("status-dot");
+        const statusText = document.getElementById("status-text");
+        const btnSettings = document.getElementById("btn-settings");
+        const settingsModal = document.getElementById("settings-modal");
+        const btnCloseSettings = document.getElementById("btn-close-settings");
+        const btnSaveSettings = document.getElementById("btn-save-settings");
+        const inputApiKey = document.getElementById("input-api-key");
+
+        const confidenceBadge = document.getElementById("confidence-badge");
+        const confidenceVal = document.getElementById("confidence-val");
+        const correctionsContainer = document.getElementById("corrections-container");
+        const insightsNoData = document.getElementById("insights-no-data");
+        const historyContainer = document.getElementById("history-container");
+        const btnClearHistory = document.getElementById("btn-clear-history");
+
+        const speakEqualizer = document.getElementById("speak-equalizer");
+        const toastMessage = document.getElementById("toast-message");
+        const toastText = document.getElementById("toast-text");
+
+        // Application State
+        let apiConfig = {
+            apiKey: "",
+            source: "none" // 'env', 'local', or 'none'
+        };
+        let translationResult = {
+            corrected: "",
+            corrections: [],
+            confidence: 0
+        };
+
+        // Initialize App
+        window.addEventListener("DOMContentLoaded", () => {
+            // Load text from URL query parameter if present
+            const urlParams = new URLSearchParams(window.location.search);
+            const textParam = urlParams.get("text");
+            if (textParam) {
+                aslInput.value = textParam.trim();
+                updateWordCount();
+            }
+
+            // Load history
+            renderHistory();
+
+            // Check config from local server, then localStorage
+            checkConfiguration();
+        });
+
+        // Event Listeners
+        aslInput.addEventListener("input", updateWordCount);
+
+        btnSettings.addEventListener("click", () => {
+            inputApiKey.value = apiConfig.source === 'local' ? apiConfig.apiKey : '';
+            settingsModal.classList.add("active");
+        });
+
+        btnCloseSettings.addEventListener("click", () => {
+            settingsModal.classList.remove("active");
+        });
+
+        btnSaveSettings.addEventListener("click", () => {
+            const val = inputApiKey.value.trim();
+            if (val) {
+                localStorage.setItem("gemini_api_key", val);
+                showToast("Configuration saved!");
+                checkConfiguration();
+            } else {
+                localStorage.removeItem("gemini_api_key");
+                showToast("Local API key removed");
+                checkConfiguration();
+            }
+            settingsModal.classList.remove("active");
+        });
+
+        btnRunAi.addEventListener("click", runAiTranslation);
+
+        btnCopy.addEventListener("click", () => {
+            if (!translationResult.corrected) return;
+            navigator.clipboard.writeText(translationResult.corrected);
+            showToast("Copied to clipboard!");
+        });
+
+        btnSpeak.addEventListener("click", speakText);
+        btnSync.addEventListener("click", syncToDesktopApp);
+        btnClearHistory.addEventListener("click", clearHistory);
+
+        // Core Functions
+        function updateWordCount() {
+            const text = aslInput.value.trim();
+            const count = text ? text.split(/\s+/).length : 0;
+            inputWordCount.textContent = `${count} word${count !== 1 ? 's' : ''}`;
+        }
+
+        async function checkConfiguration() {
+            // 1. First query local python server to see if GEMINI_API_KEY environment variable is set
+            try {
+                const response = await fetch("/api/config");
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.apiKey) {
+                        apiConfig.apiKey = data.apiKey;
+                        apiConfig.source = "env";
+                        setApiStatus(true, "System Key Connected (Desktop Env)");
+                        return;
+                    }
+                }
+            } catch (err) {
+                console.log("Local API key fetch unavailable, checking localStorage...");
+            }
+
+            // 2. Check localStorage if python server has no key or is offline
+            const localKey = localStorage.getItem("gemini_api_key");
+            if (localKey) {
+                apiConfig.apiKey = localKey;
+                apiConfig.source = "local";
+                setApiStatus(true, "Personal API Key Connected");
+            } else {
+                apiConfig.apiKey = "";
+                apiConfig.source = "none";
+                setApiStatus(false, "API Key Required — Click Settings");
+            }
+        }
+
+        function setApiStatus(ok, text) {
+            if (ok) {
+                statusDot.classList.add("active");
+                statusText.textContent = text;
+                statusText.style.color = "var(--text-secondary)";
+            } else {
+                statusDot.classList.remove("active");
+                statusText.textContent = text;
+                statusText.style.color = "var(--warning)";
+            }
+        }
+
+        async function runAiTranslation() {
+            const rawText = aslInput.value.trim();
+            if (!rawText) {
+                showToast("Please input some sign tokens first", "error");
+                return;
+            }
+
+            if (!apiConfig.apiKey) {
+                settingsModal.classList.add("active");
+                showToast("Please configure your Gemini API Key", "error");
+                return;
+            }
+
+            // Set UI to loading state
+            btnRunAi.disabled = true;
+            btnRunAi.querySelector("span").textContent = "Processing AI Translation...";
+            aiOutput.innerHTML = '<span class="output-placeholder" style="color:var(--accent);">AI is thinking... Analysing syntax tree and formatting grammar.</span>';
+
+            // Build structured prompt for Gemini
+            const prompt = `You are a professional Sign Language Translation grammar correction assistant.
+The user will provide a sequence of raw words translated literally from American Sign Language (ASL).
+ASL often lacks copulas (am/is/are), articles (a/an/the), prepositions, and uses raw root verbs or pronoun positions (e.g. "me sick" or "hospital go").
+
+Your job is to translate these raw ASL tokens into a grammatically correct, natural, and polite English sentence.
+
+Input ASL words: "${rawText}"
+
+Format your response as a valid JSON object with the following fields:
+1. "corrected": The final corrected English sentence. Keep it clear, natural, and grammatically perfect.
+2. "corrections": An array of short explanations (strings) describing the grammatical adjustments you made (e.g., "Changed 'me' to 'I' for subject pronoun case", "Added the copula 'am'", "Inserted article 'the' before hospital").
+3. "confidence": A percentage (number between 0 and 100) representing how confident you are in this grammatical reconstruction.
+
+Respond ONLY with this JSON object. Do not include markdown code block formatting (like \`\`\`json) or any other text before or after.`;
+
+            try {
+                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiConfig.apiKey}`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        contents: [{
+                            parts: [{
+                                text: prompt
+                            }]
+                        }],
+                        generationConfig: {
+                            responseMimeType: "application/json"
+                        }
+                    })
+                });
+
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.error?.message || "Failed to contact Gemini API");
+                }
+
+                const data = await response.json();
+                let text = data.candidates[0].content.parts[0].text.trim();
+
+                // Extra security if JSON wrapping exists
+                if (text.startsWith("```")) {
+                    text = text.replace(/^```json\s*/i, "").replace(/```$/, "").trim();
+                }
+
+                const parsed = JSON.parse(text);
+                translationResult.corrected = parsed.corrected || "";
+                translationResult.corrections = parsed.corrections || [];
+                translationResult.confidence = parsed.confidence || 0;
+
+                // Update Output Box (with typing effect)
+                aiOutput.innerHTML = "";
+                const outSpan = document.createElement("span");
+                aiOutput.appendChild(outSpan);
+                typeSentence(outSpan, translationResult.corrected);
+
+                // Update Confidence
+                confidenceVal.textContent = `${translationResult.confidence}%`;
+                confidenceBadge.style.display = "block";
+
+                // Update Insights
+                renderInsights(translationResult.corrections);
+
+                // Enable action buttons
+                btnSync.disabled = false;
+                btnSpeak.disabled = false;
+                btnCopy.disabled = false;
+
+                // Add to History
+                saveToHistory(rawText, translationResult.corrected);
+
+            } catch (err) {
+                console.error(err);
+                aiOutput.innerHTML = `<span style="color:var(--error); font-size:15px; font-weight:normal;">❌ Error: ${err.message}</span>`;
+                btnSync.disabled = true;
+                btnSpeak.disabled = true;
+                btnCopy.disabled = true;
+            } finally {
+                btnRunAi.disabled = false;
+                btnRunAi.querySelector("span").textContent = "✨ Enhance with Gemini AI";
+            }
+        }
+
+        // Typing Effect Helper
+        function typeSentence(element, text) {
+            let index = 0;
+            element.textContent = "";
+            const interval = setInterval(() => {
+                if (index < text.length) {
+                    element.textContent += text.charAt(index);
+                    index++;
+                } else {
+                    clearInterval(interval);
+                }
+            }, 20);
+        }
+
+        function renderInsights(corrections) {
+            correctionsContainer.innerHTML = "";
+
+            if (corrections.length === 0) {
+                correctionsContainer.innerHTML = '<div class="correction-item">No syntax changes needed — input was already grammatically standard!</div>';
+                return;
+            }
+
+            corrections.forEach(item => {
+                const div = document.createElement("div");
+                div.className = "correction-item";
+                // SVG checkmark
+                div.innerHTML = `
+                    <svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"></path></svg>
+                    <span>${item}</span>
+                `;
+                correctionsContainer.appendChild(div);
+            });
+        }
+
+        // In-Browser Speech Synthesis
+        function speakText() {
+            if (!translationResult.corrected) return;
+
+            // Stop any ongoing speech
+            window.speechSynthesis.cancel();
+
+            const utterance = new SpeechSynthesisUtterance(translationResult.corrected);
+            utterance.rate = 1.0;
+            utterance.pitch = 1.0;
+
+            // Audio Wave Equalizer feedback
+            utterance.onstart = () => {
+                speakEqualizer.classList.add("active");
+            };
+
+            utterance.onend = () => {
+                speakEqualizer.classList.remove("active");
+            };
+
+            utterance.onerror = () => {
+                speakEqualizer.classList.remove("active");
+            };
+
+            window.speechSynthesis.speak(utterance);
+        }
+
+        // Send corrected text back to the desktop application local server
+        async function syncToDesktopApp() {
+            if (!translationResult.corrected) return;
+            btnSync.disabled = true;
+            btnSync.textContent = "Syncing...";
+
+            try {
+                const encodedText = encodeURIComponent(translationResult.corrected);
+                const response = await fetch(`/api/receive?text=${encodedText}`);
+                if (response.ok) {
+                    showToast("Synced text back to desktop application!");
+                } else {
+                    throw new Error("Local server rejected request");
+                }
+            } catch (err) {
+                console.error(err);
+                showToast("Failed to sync. Is the desktop application running?", "error");
+            } finally {
+                btnSync.disabled = false;
+                btnSync.innerHTML = `
+                    <svg class="icon-inline" viewBox="0 0 24 24"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path></svg>
+                    Sync to Desktop App
+                `;
+            }
+        }
+
+        // History Management
+        function saveToHistory(raw, fixed) {
+            let history = JSON.parse(localStorage.getItem("sign2sound_history") || "[]");
+
+            // Remove duplicates of the same raw string to keep it clean
+            history = history.filter(item => item.raw.toLowerCase() !== raw.toLowerCase());
+
+            // Insert at beginning
+            history.unshift({
+                raw: raw,
+                fixed: fixed,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            });
+
+            // Cap at 10 items
+            if (history.length > 10) history.pop();
+
+            localStorage.setItem("sign2sound_history", JSON.stringify(history));
+            renderHistory();
+        }
+
+        function renderHistory() {
+            const history = JSON.parse(localStorage.getItem("sign2sound_history") || "[]");
+            historyContainer.innerHTML = "";
+
+            if (history.length === 0) {
+                historyContainer.innerHTML = '<div class="no-data">No history items found.</div>';
+                return;
+            }
+
+            history.forEach(item => {
+                const div = document.createElement("div");
+                div.className = "history-item";
+                div.innerHTML = `
+                    <div class="history-item-top">
+                        <span>ASL Gesture Capture</span>
+                        <span>${item.timestamp}</span>
+                    </div>
+                    <div class="history-item-raw">${item.raw}</div>
+                    <div class="history-item-fixed">${item.fixed}</div>
+                `;
+
+                div.addEventListener("click", () => {
+                    aslInput.value = item.raw;
+                    updateWordCount();
+
+                    translationResult.corrected = item.fixed;
+                    translationResult.corrections = [];
+                    translationResult.confidence = 100;
+
+                    aiOutput.innerHTML = `<span>${item.fixed}</span>`;
+                    confidenceBadge.style.display = "none";
+                    correctionsContainer.innerHTML = '<div class="no-data">Restored historical translation. Click "Enhance" to re-generate insights.</div>';
+
+                    btnSync.disabled = false;
+                    btnSpeak.disabled = false;
+                    btnCopy.disabled = false;
+
+                    showToast("Restored translation from history");
+                });
+
+                historyContainer.appendChild(div);
+            });
+        }
+
+        function clearHistory() {
+            localStorage.removeItem("sign2sound_history");
+            renderHistory();
+            showToast("History cleared!");
+        }
+
+        // Custom Toast System
+        function showToast(message, type = "success") {
+            toastText.textContent = message;
+            toastMessage.className = "toast show";
+
+            if (type === "error") {
+                toastMessage.classList.add("error");
+                toastMessage.querySelector("svg").style.stroke = "var(--error)";
+            } else {
+                toastMessage.querySelector("svg").style.stroke = "var(--success)";
+            }
+
+            setTimeout(() => {
+                toastMessage.classList.remove("show");
+            }, 3000);
+        }
+    </script>
+</body>
+
+</html>

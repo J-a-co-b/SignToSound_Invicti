@@ -20,6 +20,12 @@ from collections import deque
 import customtkinter as ctk
 from PIL import Image, ImageTk
 import joblib
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs, quote
+import threading
+import webbrowser
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ==================================================
 # Pose landmark indices for word-mode feature extraction
@@ -47,6 +53,68 @@ def tts_worker(conn):
             break
         except Exception as e:
             print(f"TTS Worker Error: {e}")
+
+
+# ==================================================
+# 1.5. LOCAL WEB SERVER HANDLER FOR ONLINE AI
+# ==================================================
+class LocalHTTPServer(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def do_GET(self):
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
+
+        if path == "/" or path == "/index.html":
+            self.send_response(200)
+            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.end_headers()
+            
+            html_path = os.path.join(APP_DIR, "online_mode", "index.html")
+            try:
+                with open(html_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.wfile.write(content.encode("utf-8"))
+            except Exception as e:
+                self.wfile.write(f"Error loading index.html: {e}".encode("utf-8"))
+
+        elif path == "/api/current":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            current_text = ""
+            app_instance = getattr(self.server, "app_instance", None)
+            if app_instance:
+                current_text = app_instance.word
+            response = json.dumps({"text": current_text.strip()})
+            self.wfile.write(response.encode("utf-8"))
+
+        elif path == "/api/config":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            api_key = os.environ.get("GEMINI_API_KEY", "")
+            response = json.dumps({"apiKey": api_key})
+            self.wfile.write(response.encode("utf-8"))
+
+        elif path == "/api/receive":
+            query = parse_qs(parsed_url.query)
+            text = query.get("text", [""])[0]
+            app_instance = getattr(self.server, "app_instance", None)
+            if app_instance:
+                app_instance.update_text_from_web(text)
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(b'{"status": "success"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found")
 
 
 # ==================================================
@@ -182,6 +250,10 @@ class SignLanguageApp:
         # --- CAMERA ---
         self.cap = self._open_camera()
 
+        # --- START LOCAL WEB SERVER FOR ONLINE AI ---
+        self.web_server = None
+        self.start_local_web_server()
+
         self.build_ui()
         self.update_video()
 
@@ -271,17 +343,19 @@ class SignLanguageApp:
 
         # ── Action buttons ───────────────────────────
         ctk.CTkButton(self.info_frame, text="␣ Space",
-                      command=self.add_space, fg_color="#3498DB").place(relx=0.5, y=330, anchor=ctk.CENTER)
+                      command=self.add_space, fg_color="#3498DB", width=115).place(relx=0.28, y=330, anchor=ctk.CENTER)
         ctk.CTkButton(self.info_frame, text="⌫ Delete",
-                      command=self.delete_last, fg_color="#F39C12").place(relx=0.5, y=370, anchor=ctk.CENTER)
+                      command=self.delete_last, fg_color="#F39C12", width=115).place(relx=0.72, y=330, anchor=ctk.CENTER)
         ctk.CTkButton(self.info_frame, text="🗑️ Clear",
-                      command=self.clear_word, fg_color="#E74C3C").place(relx=0.5, y=410, anchor=ctk.CENTER)
-        ctk.CTkButton(self.info_frame, text="🪄 Translate & Speak",
-                      command=self.manual_speak, fg_color="#2ECC71").place(relx=0.5, y=450, anchor=ctk.CENTER)
+                      command=self.clear_word, fg_color="#E74C3C", width=115).place(relx=0.28, y=375, anchor=ctk.CENTER)
+        ctk.CTkButton(self.info_frame, text="🪄 Local Translate",
+                      command=self.manual_speak, fg_color="#2ECC71", width=115).place(relx=0.72, y=375, anchor=ctk.CENTER)
+        ctk.CTkButton(self.info_frame, text="🌐 Online AI Correct",
+                      command=self.open_online_ai, fg_color="#6C63FF", width=230).place(relx=0.5, y=425, anchor=ctk.CENTER)
 
         self.auto_speak_switch = ctk.CTkSwitch(self.info_frame, text="Auto-Speak",
                                                variable=self.auto_speak_var)
-        self.auto_speak_switch.place(relx=0.2, y=480)
+        self.auto_speak_switch.place(relx=0.5, y=470, anchor=ctk.CENTER)
 
         # ── Sentence bar ─────────────────────────────
         self.bottom_frame = ctk.CTkFrame(self.root, width=960, height=60, corner_radius=10)
@@ -615,11 +689,46 @@ class SignLanguageApp:
             self.word_cooldown_until = now + 1.5
 
     # --------------------------------------------------
+    def start_local_web_server(self):
+        def run():
+            try:
+                self.web_server = HTTPServer(('localhost', 5892), LocalHTTPServer)
+                self.web_server.app_instance = self
+                self.web_server.serve_forever()
+            except Exception as e:
+                print(f"⚠️ Web server failed to start: {e}")
+        server_thread = threading.Thread(target=run, daemon=True)
+        server_thread.start()
+
+    def open_online_ai(self):
+        current_text = self.word.strip()
+        encoded_text = quote(current_text)
+        url = f"http://localhost:5892/?text={encoded_text}"
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            print(f"Error opening browser: {e}")
+
+    def update_text_from_web(self, text):
+        def _update():
+            self.word = text + " " if text else ""
+            self.word_display.configure(text=self.word)
+            self.letter_buffer = []
+        self.root.after(0, _update)
+
+    # --------------------------------------------------
     def on_close(self):
         try:
             self.parent_conn.send("STOP")
         except:
             pass
+        # Shutdown web server
+        if hasattr(self, "web_server") and self.web_server:
+            try:
+                self.web_server.shutdown()
+                self.web_server.server_close()
+            except Exception as e:
+                print(f"Error shutting down web server: {e}")
         self.cap.release()
         self.root.destroy()
 
