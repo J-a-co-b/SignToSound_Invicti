@@ -739,10 +739,13 @@ class SignLanguageApp:
         server_thread = threading.Thread(target=run, daemon=True)
         server_thread.start()
 
+    # Deployed GitHub Pages URL — update this if the repo name changes
+    ONLINE_AI_URL = "https://j-a-co-b.github.io/SignToSound_Invicti/online_mode/"
+
     def open_online_ai(self):
         current_text = self.word.strip()
         encoded_text = quote(current_text)
-        url = f"http://localhost:5892/?text={encoded_text}"
+        url = f"{self.ONLINE_AI_URL}?text={encoded_text}"
         try:
             webbrowser.open(url)
         except Exception as e:
