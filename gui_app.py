@@ -1,4 +1,10 @@
-from grammar_engine import process_sentence
+import math
+import threading
+try:
+    from transformers import T5ForConditionalGeneration, T5Tokenizer
+    _TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    _TRANSFORMERS_AVAILABLE = False
 import cv2
 import numpy as np
 import os
@@ -20,10 +26,6 @@ from collections import deque
 import customtkinter as ctk
 from PIL import Image, ImageTk
 import joblib
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs, quote
-import threading
-import webbrowser
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -55,103 +57,6 @@ def tts_worker(conn):
             print(f"TTS Worker Error: {e}")
 
 
-# ==================================================
-# 1.5. LOCAL WEB SERVER HANDLER FOR ONLINE AI
-# ==================================================
-class LocalHTTPServer(BaseHTTPRequestHandler):
-    """Secure local server — bound to 127.0.0.1 only, no CORS headers.
-    
-    SECURITY NOTES:
-    - No Access-Control-Allow-Origin headers are set. This prevents any external
-      website from making cross-origin requests to this server via a browser.
-    - All API endpoints are served from the same origin (localhost:5892), so the
-      locally-served index.html does not need CORS to call them.
-    - /api/receive validates the Origin header to prevent cross-site text injection.
-    - The server binds to 127.0.0.1 (loopback), not 0.0.0.0, so it is invisible
-      to other devices on the local network.
-    """
-
-    _ALLOWED_ORIGIN = "http://localhost:5892"
-
-    def log_message(self, format, *args):
-        pass  # Suppress request logs
-
-    def _is_local_origin(self):
-        """Returns True only if the request originates from our own local server."""
-        origin = self.headers.get("Origin", "")
-        referer = self.headers.get("Referer", "")
-        # Allow requests with no origin (same-tab navigation, direct browser bar)
-        if not origin and not referer:
-            return True
-        return origin.startswith(self._ALLOWED_ORIGIN) or referer.startswith(self._ALLOWED_ORIGIN)
-
-    def do_GET(self):
-        parsed_url = urlparse(self.path)
-        path = parsed_url.path
-
-        if path == "/" or path == "/index.html":
-            html_path = os.path.join(APP_DIR, "online_mode", "index.html")
-            try:
-                with open(html_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                self.send_response(200)
-                self.send_header("Content-type", "text/html; charset=utf-8")
-                # Harden browser security for the served page
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("X-Frame-Options", "DENY")
-                self.end_headers()
-                self.wfile.write(content.encode("utf-8"))
-            except Exception as e:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(f"Error loading index.html: {e}".encode("utf-8"))
-
-        elif path == "/api/current":
-            # No CORS header — only accessible from same origin (our served page)
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            current_text = ""
-            app_instance = getattr(self.server, "app_instance", None)
-            if app_instance:
-                current_text = app_instance.word
-            response = json.dumps({"text": current_text.strip()})
-            self.wfile.write(response.encode("utf-8"))
-
-        elif path == "/api/config":
-            # No CORS header — API key is only served to our own local page.
-            # Any external site that tries to fetch this will be blocked by the browser
-            # because we do not grant cross-origin access.
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            api_key = os.environ.get("GEMINI_API_KEY", "")
-            response = json.dumps({"apiKey": api_key})
-            self.wfile.write(response.encode("utf-8"))
-
-        elif path == "/api/receive":
-            # Validate origin before allowing text injection into the desktop app.
-            if not self._is_local_origin():
-                self.send_response(403)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"error": "Forbidden: cross-origin request rejected"}')
-                return
-            query = parse_qs(parsed_url.query)
-            text = query.get("text", [""])[0]
-            # Sanitise: strip and limit length
-            text = text.strip()[:500]
-            app_instance = getattr(self.server, "app_instance", None)
-            if app_instance:
-                app_instance.update_text_from_web(text)
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"status": "success"}')
-        else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b"Not Found")
 
 
 # ==================================================
@@ -161,8 +66,27 @@ class SignLanguageApp:
     def __init__(self, root):
         self.root = root
         self.root.title("SignToSound")
-        self.root.geometry("1000x680")
-        self.root.resizable(False, False)
+        self.root.geometry("1100x720")
+        self.root.resizable(True, True)
+        try:
+            self.root.state("zoomed")
+        except:
+            pass
+        
+        ctk.set_appearance_mode("Dark")
+        # ── Palette: Deep Indigo ──
+        self.bg_color = "#0A0E1A"
+        self.card_color = "#131829"
+        self.card_alt = "#1D2440"
+        self.accent_primary = "#6366F1"     # indigo
+        self.accent_secondary = "#22D3EE"   # cyan
+        self.text_primary = "#F1F5F9"
+        self.text_secondary = "#7C85A3"
+        self.root.configure(fg_color=self.bg_color)
+
+        self.displayed_word = ""
+        self.target_word = ""
+        self.typewriter_job = None
 
         # --- MULTIPROCESSING TTS PIPE ---
         self.parent_conn, self.child_conn = multiprocessing.Pipe()
@@ -170,8 +94,6 @@ class SignLanguageApp:
         self.proc.start()
 
         # --- LOAD LETTER MODEL ---
-        # Rebuild architecture in code to avoid Keras version config issues.
-        # Weights are loaded separately — works on any TF/Keras version.
         self.model = Sequential([
             Dense(128, activation='relu', input_shape=(63,)),
             BatchNormalization(momentum=0.99, epsilon=0.001),
@@ -184,15 +106,13 @@ class SignLanguageApp:
         ])
         self.model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
         self.model.load_weights('sign_language_model.weights.h5')
-        # ASL alphabet — 24 static letters (J and Z excluded as they are dynamic)
         self.actions = np.array(['A','B','C','D','E','F','G','H','I',
                                   'K','L','M','N','O','P','Q','R','S',
                                   'T','U','V','W','X','Y'])
 
         # --- LOAD WORD MODEL ---
-        # Rebuild Separable 1D-CNN architecture in code — avoids renorm/version issues.
         with open("word_label_map.json") as f:
-            self.word_labels = json.load(f)  # {"0": "DRINK", ...}
+            self.word_labels = json.load(f)
         self.word_list = [self.word_labels[str(i)] for i in range(len(self.word_labels))]
         n_classes = len(self.word_labels)
 
@@ -229,18 +149,11 @@ class SignLanguageApp:
         # --- LOAD SCALERS ---
         scaler_path = os.path.join(os.getcwd(), "scaler.pkl")
         self.scaler = joblib.load(scaler_path) if os.path.exists(scaler_path) else None
-        if self.scaler is None:
-            print("⚠️  scaler.pkl not found – using per-sample max normalisation.")
-
         word_scaler_path = os.path.join(os.getcwd(), "word_scaler.pkl")
         self.word_scaler = joblib.load(word_scaler_path) if os.path.exists(word_scaler_path) else None
-        if self.word_scaler is None:
-            print("⚠️  word_scaler.pkl not found – word mode may be less accurate.")
 
         # --- LOAD MEDIAPIPE DETECTORS ---
         SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-        # Hand detector
         hand_model_path = os.path.join(SCRIPT_DIR, "hand_landmarker.task")
         hand_options = vision.HandLandmarkerOptions(
             base_options=python.BaseOptions(model_asset_path=hand_model_path),
@@ -248,7 +161,6 @@ class SignLanguageApp:
         )
         self.hand_detector = vision.HandLandmarker.create_from_options(hand_options)
 
-        # Pose detector (for word mode)
         pose_model_path = os.path.join(SCRIPT_DIR, "pose_landmarker.task")
         pose_options = vision.PoseLandmarkerOptions(
             base_options=python.BaseOptions(model_asset_path=pose_model_path),
@@ -258,28 +170,26 @@ class SignLanguageApp:
         )
         self.pose_detector = vision.PoseLandmarker.create_from_options(pose_options)
 
-        # --- MODE ---
-        self.mode_var = ctk.StringVar(value="LETTER")  # "LETTER" or "WORD"
+        # --- AUTO MODE VARIABLES ---
+        self.emitted_letters = []
 
         # --- LETTER MODE VARIABLES ---
         self.prediction_buffer = deque(maxlen=5)
         self.current_stable_letter = ""
         self.stable_frames = 0
-        self.CONFIDENCE_THRESHOLD = 0.70
+        self.CONFIDENCE_THRESHOLD = 0.80
         self.REQUIRED_FRAMES = 5
         self.letter_buffer = []
         self.word = ""
         self.last_seen_time = time.time()
         self.PAUSE_TIME = 1.5
-        self.auto_speak_var = ctk.BooleanVar(value=False)
+        self._enhanced = False   # tracks whether current text has already been enhanced
 
         # --- WORD MODE VARIABLES ---
-        # Timed recording: collect ALL frames for RECORD_DURATION seconds,
-        # then evenly subsample to 30 — matching training's sample_frames() logic.
-        self.RECORD_DURATION   = 2.5   # seconds (match typical sign duration)
-        self.word_raw_buffer   = []    # stores ALL feature vecs during recording window
-        self.word_recording    = False # True while actively recording
-        self.word_record_start = 0.0   # time.time() when recording started
+        self.RECORD_DURATION   = 2.5
+        self.word_raw_buffer   = []
+        self.word_recording    = False
+        self.word_record_start = 0.0
         self.word_cooldown_until = 0.0
         self.last_word_prediction = ""
         self.last_word_confidence = 0.0
@@ -287,252 +197,474 @@ class SignLanguageApp:
         # --- CAMERA ---
         self.cap = self._open_camera()
 
-        # --- START LOCAL WEB SERVER FOR ONLINE AI ---
-        self.web_server = None
-        self.start_local_web_server()
-
         self.build_ui()
         self.update_video()
+        # Load GEC model in the background so the UI opens instantly
+        threading.Thread(target=self._load_gec_model, daemon=True).start()
 
-    # --------------------------------------------------
     def _open_camera(self):
         backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_ANY
         cap = cv2.VideoCapture(0, backend)
         if not cap.isOpened():
-            print("WARNING: Camera index 0 failed. Trying 1-3...")
             for i in range(1, 4):
                 cap = cv2.VideoCapture(i, backend)
                 if cap.isOpened():
-                    print(f"Camera found at index {i}")
                     break
         if cap.isOpened():
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         return cap
 
-    # --------------------------------------------------
     def speak_word(self, text):
         if text.strip():
             try:
                 self.parent_conn.send(text)
             except:
                 pass
+            self.animate_waveform(15)
 
-    # --------------------------------------------------
+    def animate_waveform(self, ticks):
+        if ticks > 0:
+            self.draw_waveform(1)
+            self.root.after(100, lambda: self.animate_waveform(ticks-1))
+        else:
+            self.draw_waveform(0)
+
     def build_ui(self):
-        # ── Video panel ──────────────────────────────
-        self.video_frame = ctk.CTkFrame(self.root, width=660, height=500, corner_radius=10)
-        self.video_frame.place(x=20, y=20)
-        self.video_label = ctk.CTkLabel(self.video_frame, text="Webcam Loading...")
+        self.f_title = ("Segoe UI", 24, "bold")
+        self.f_header = ("Segoe UI", 16, "bold")
+        self.f_body = ("Segoe UI", 14)
+        self.f_large = ("Segoe UI", 48, "bold")
+        
+        # Size the video column to maintain 4:3 aspect ratio based on available window height.
+        # This keeps the camera view natural (no zoom) and lets the right panel expand freely.
+        self.root.update_idletasks()
+        win_h = self.root.winfo_height()
+        win_w = self.root.winfo_width()
+        # Vertical overhead: title bar (~30) + top pady (20) + gap (10) + bottom bar (180) + bottom paddings (30)
+        video_panel_h = max(300, win_h - 270)
+        # Width to maintain 4:3, plus frame's own padding
+        video_col_w = int(video_panel_h * 4 / 3) + 30
+        # Never take more than 65% of window width
+        video_col_w = min(video_col_w, int(win_w * 0.65))
+        self.root.grid_columnconfigure(0, weight=0, minsize=video_col_w)
+        self.root.grid_columnconfigure(1, weight=1)   # right panel expands
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_rowconfigure(1, weight=0, minsize=180)
+        
+        # ── Video panel ──
+        self.video_frame = ctk.CTkFrame(self.root, corner_radius=20, fg_color="#000000")
+        self.video_frame.grid(row=0, column=0, padx=(20, 10), pady=(20, 10), sticky="nsew")
+        self.video_label = ctk.CTkLabel(self.video_frame, text="Webcam Loading...", font=self.f_body, fg_color="transparent")
         self.video_label.place(relx=0.5, rely=0.5, anchor=ctk.CENTER)
 
-        # ── Right info panel ─────────────────────────
-        self.info_frame = ctk.CTkFrame(self.root, width=280, height=500, corner_radius=10)
-        self.info_frame.place(x=700, y=20)
+        # ── Info panel — all children packed, nothing ever clips ──
+        self.info_frame = ctk.CTkFrame(self.root, corner_radius=20, fg_color=self.card_color)
+        self.info_frame.grid(row=0, column=1, padx=(10, 20), pady=(20, 10), sticky="nsew")
 
-        # ── Mode selector ────────────────────────────
-        ctk.CTkLabel(self.info_frame, text="Mode",
-                     font=("Arial", 14, "bold")).place(x=20, y=15)
 
-        self.mode_seg = ctk.CTkSegmentedButton(
-            self.info_frame, values=["LETTER", "WORD"],
-            variable=self.mode_var,
-            command=self._on_mode_change,
-            font=("Arial", 14, "bold"),
-            selected_color="#6C63FF",
-            selected_hover_color="#5A52E0",
-            width=240
+
+        # ── Confidence ring ──
+        self.ring_canvas = ctk.CTkCanvas(
+            self.info_frame, width=150, height=150,
+            bg=self.card_color, highlightthickness=0
         )
-        self.mode_seg.place(x=20, y=45)
+        self.ring_canvas.pack(pady=(14, 0))
 
-        # ── Prediction display ───────────────────────
-        ctk.CTkLabel(self.info_frame, text="Detected",
-                     font=("Arial", 16, "bold")).place(x=20, y=95)
+        # Static background track
+        self.ring_canvas.create_oval(10, 10, 140, 140, outline=self.card_alt, width=12)
 
-        self.letter_display = ctk.CTkLabel(self.info_frame, text="-",
-                                           font=("Arial", 72, "bold"), text_color="#00FFCC")
-        self.letter_display.place(relx=0.5, y=175, anchor=ctk.CENTER)
+        self._ring_cx, self._ring_cy, self._ring_r = 75, 75, 65
+        self._ring_steps = 200
+        self._ring_grad_start = (99, 102, 241)
+        self._ring_grad_end   = (34, 211, 238)
+        self.ring_segments = []
 
-        self.conf_display = ctk.CTkLabel(self.info_frame, text="Confidence: 0%",
-                                         font=("Arial", 14))
-        self.conf_display.place(x=20, y=230)
+        for i in range(self._ring_steps):
+            factor = i / (self._ring_steps - 1)
+            r = int(self._ring_grad_start[0] + (self._ring_grad_end[0] - self._ring_grad_start[0]) * factor)
+            g = int(self._ring_grad_start[1] + (self._ring_grad_end[1] - self._ring_grad_start[1]) * factor)
+            b = int(self._ring_grad_start[2] + (self._ring_grad_end[2] - self._ring_grad_start[2]) * factor)
+            color = f"#{r:02x}{g:02x}{b:02x}"
+            seg = self.ring_canvas.create_line(0, 0, 0, 0, fill=color, width=12,
+                                                capstyle="round", state="hidden")
+            self.ring_segments.append(seg)
 
-        self.stable_display = ctk.CTkLabel(self.info_frame, text="Stability: 0/5",
-                                           font=("Arial", 14))
-        self.stable_display.place(x=20, y=258)
+        self.draw_confidence_ring(0)
 
-        # ── Word mode status (hidden initially) ──────
-        self.word_mode_status = ctk.CTkLabel(
-            self.info_frame, text="",
-            font=("Arial", 13), text_color="#BDC3C7"
+        # Percentage label embedded inside the ring canvas (no clipping possible)
+        self.ring_value_label = ctk.CTkLabel(
+            self.ring_canvas, text="0%", font=("Segoe UI", 26, "bold"),
+            text_color=self.accent_secondary, fg_color=self.card_color
         )
-        self.word_mode_status.place(x=20, y=258)
-        self.word_mode_status.place_forget()  # hidden in letter mode
+        self.ring_canvas.create_window(75, 75, window=self.ring_value_label)
 
-        # ── Word mode progress bar ───────────────────
+        # Hidden letter display — not shown, kept for internal logic
+        self.letter_display = ctk.CTkLabel(self.info_frame, text="", font=self.f_large)
+
+        # Confidence label
+        self.conf_display = ctk.CTkLabel(
+            self.info_frame, text="Confidence: 0%",
+            font=self.f_body, text_color=self.accent_secondary
+        )
+        self.conf_display.pack(pady=(10, 0))
+
+        self.status_area = ctk.CTkFrame(self.info_frame, fg_color="transparent", height=30)
+        self.status_area.pack(pady=(4, 0), padx=20, fill="x")
+
+        self.auto_mode_status = ctk.CTkLabel(
+            self.status_area, text="Waiting for sign...", font=self.f_body, text_color=self.text_secondary
+        )
+        self.auto_mode_status.pack()
+
         self.word_progress = ctk.CTkProgressBar(
-            self.info_frame, width=240, height=12,
-            corner_radius=6, progress_color="#6C63FF"
+            self.info_frame, height=8, progress_color=self.accent_primary
         )
+        self.word_progress.pack(pady=(4, 0), padx=20, fill="x")
         self.word_progress.set(0)
-        self.word_progress.place(x=20, y=290)
-        self.word_progress.place_forget()  # hidden in letter mode
 
-        # ── Action buttons ───────────────────────────
-        ctk.CTkButton(self.info_frame, text="␣ Space",
-                      command=self.add_space, fg_color="#3498DB", width=115).place(relx=0.28, y=330, anchor=ctk.CENTER)
-        ctk.CTkButton(self.info_frame, text="⌫ Delete",
-                      command=self.delete_last, fg_color="#F39C12", width=115).place(relx=0.72, y=330, anchor=ctk.CENTER)
-        ctk.CTkButton(self.info_frame, text="🗑️ Clear",
-                      command=self.clear_word, fg_color="#E74C3C", width=115).place(relx=0.28, y=375, anchor=ctk.CENTER)
-        ctk.CTkButton(self.info_frame, text="🪄 Local Translate",
-                      command=self.manual_speak, fg_color="#2ECC71", width=115).place(relx=0.72, y=375, anchor=ctk.CENTER)
-        ctk.CTkButton(self.info_frame, text="🌐 Online AI Correct",
-                      command=self.open_online_ai, fg_color="#6C63FF", width=230).place(relx=0.5, y=425, anchor=ctk.CENTER)
+        # ── Button row 1a: Space ──
+        btn_space = ctk.CTkFrame(self.info_frame, fg_color="transparent")
+        btn_space.pack(pady=(18, 0), padx=20, fill="x")
+        ctk.CTkButton(btn_space, text="\u2423 Space", font=self.f_body,
+                      command=self.add_space, fg_color=self.card_alt, width=0
+                      ).pack(side="left", expand=True, fill="x")
 
-        self.auto_speak_switch = ctk.CTkSwitch(self.info_frame, text="Auto-Speak",
-                                               variable=self.auto_speak_var)
-        self.auto_speak_switch.place(relx=0.5, y=470, anchor=ctk.CENTER)
+        # ── Button row 1b: Backspace / Delete Word / Clear ──
+        btn_row1 = ctk.CTkFrame(self.info_frame, fg_color="transparent")
+        btn_row1.pack(pady=(6, 0), padx=20, fill="x")
+        ctk.CTkButton(btn_row1, text="\u232b Backspace", font=self.f_body,
+                      command=self.delete_last, fg_color=self.card_alt, width=0
+                      ).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ctk.CTkButton(btn_row1, text="\u2715 Del Word", font=self.f_body,
+                      command=self.delete_word, fg_color=self.card_alt, width=0
+                      ).pack(side="left", expand=True, fill="x", padx=4)
+        ctk.CTkButton(btn_row1, text="\U0001f5d1\ufe0f Clear", font=self.f_body,
+                      command=self.clear_word, fg_color="#E5484D", width=0
+                      ).pack(side="left", expand=True, fill="x", padx=(4, 0))
 
-        # ── Sentence bar ─────────────────────────────
-        self.bottom_frame = ctk.CTkFrame(self.root, width=960, height=60, corner_radius=10)
-        self.bottom_frame.place(x=20, y=540)
-        ctk.CTkLabel(self.bottom_frame, text="Sentence:",
-                     font=("Arial", 18, "bold")).place(x=20, y=15)
-        self.word_display = ctk.CTkLabel(self.bottom_frame, text="",
-                                         font=("Arial", 28, "bold"), text_color="#FFD700")
-        self.word_display.place(x=130, y=12)
-
-        # ── Word mode info bar ───────────────────────
-        self.word_info_frame = ctk.CTkFrame(self.root, width=960, height=50, corner_radius=10)
-        self.word_info_frame.place(x=20, y=615)
-
-        self.word_info_label = ctk.CTkLabel(
-            self.word_info_frame,
-            text="📝 LETTER MODE — Sign individual letters to spell words",
-            font=("Arial", 14),
-            text_color="#BDC3C7"
+        # ── Button row 2: Enhance (starts disabled until T5 loads) ──
+        btn_row2 = ctk.CTkFrame(self.info_frame, fg_color="transparent")
+        btn_row2.pack(pady=(8, 0), padx=20, fill="x")
+        self.enhance_btn = ctk.CTkButton(
+            btn_row2, text="⏳ Loading AI…", font=self.f_body,
+            command=self.manual_speak, fg_color=self.card_alt,
+            state="disabled", width=0
         )
-        self.word_info_label.place(x=20, y=12)
+        self.enhance_btn.pack(side="left", expand=True, fill="x")
 
-    # --------------------------------------------------
-    def _on_mode_change(self, new_mode):
-        self.word_raw_buffer.clear()
-        self.prediction_buffer.clear()
-        self.stable_frames = 0
-        self.current_stable_letter = ""
+        # ── Button row 3: Speak Out Loud ──
+        btn_row3 = ctk.CTkFrame(self.info_frame, fg_color="transparent")
+        btn_row3.pack(pady=(8, 0), padx=20, fill="x")
+        ctk.CTkButton(
+            btn_row3, text="\U0001f50a Speak Out Loud", font=self.f_body,
+            command=self.speak_out_loud,
+            fg_color="#16A34A", hover_color="#15803D", width=0
+        ).pack(side="left", expand=True, fill="x")
 
-        if new_mode == "WORD":
-            # Reset all recording state
-            self.word_recording    = False
-            self.word_raw_buffer   = []
-            self.word_cooldown_until = 0
-            # Switch UI
-            self.letter_display.configure(text="—", text_color="#888888")
-            self.conf_display.configure(text="Confidence: —")
-            self.stable_display.place_forget()
-            self.word_mode_status.place(x=20, y=258)
-            self.word_mode_status.configure(text="Show your hands to start recording")
-            self.word_progress.place(x=20, y=290)
-            self.word_progress.set(0)
-            self.word_info_label.configure(
-                text=f"🤟 WORD MODE — Show hands, hold sign for {self.RECORD_DURATION:.0f}s, auto-predicts"
+        # ── Sentence / bottom bar ──
+        self.bottom_frame = ctk.CTkFrame(self.root, corner_radius=20, fg_color=self.card_color)
+        self.bottom_frame.grid(row=1, column=0, columnspan=2, padx=20, pady=(10, 20), sticky="nsew")
+        
+        self.wave_canvas = ctk.CTkCanvas(
+            self.bottom_frame, width=100, height=40,
+            bg=self.card_color, highlightthickness=0
+        )
+        self.wave_canvas.place(relx=1.0, x=-120, y=20)
+        self.draw_waveform(0)
+
+        ctk.CTkLabel(self.bottom_frame, text="Live Output:", font=self.f_header).place(x=20, y=20)
+        self.word_display = ctk.CTkLabel(
+            self.bottom_frame, text="",
+            font=("Segoe UI", 32, "bold"), text_color="#E3B341", justify="left"
+        )
+        self.word_display.place(x=20, y=60)
+        
+        self.word_info_label = ctk.CTkLabel(
+            self.bottom_frame,
+            text="\U0001f916 AUTO MODE \u2014 Sign letters or words directly, the AI will auto-detect",
+            font=self.f_body, text_color=self.text_secondary
+        )
+        self.word_info_label.place(x=20, rely=1.0, y=-40)
+        
+        def update_wraplength(event):
+            self.word_display.configure(wraplength=event.width - 40)
+        self.bottom_frame.bind("<Configure>", update_wraplength)
+
+    def draw_confidence_ring(self, percentage):
+        """Draws a smooth gradient ring sweeping clockwise from the top (12 o'clock).
+        Turns green when percentage >= 80, otherwise indigo-to-cyan gradient."""
+        if not hasattr(self, 'ring_segments'):
+            return
+        percentage = max(0, min(100, percentage))
+        visible_steps = round((percentage / 100) * self._ring_steps)
+        high_conf = percentage >= 80
+
+        cx, cy, r = self._ring_cx, self._ring_cy, self._ring_r
+        for i, seg in enumerate(self.ring_segments):
+            if i >= visible_steps:
+                self.ring_canvas.itemconfig(seg, state="hidden")
+                continue
+            frac = i / (self._ring_steps - 1)
+            if high_conf:
+                # Solid green gradient: dark green → bright green
+                g_val = int(160 + 74 * frac)   # 160 → 234
+                color = f"#22{g_val:02x}5E".replace("5E", f"{int(60 + 38*frac):02x}")
+                # Simpler: blend #16A34A → #4ADE80
+                r_c = int(0x16 + (0x4A - 0x16) * frac)
+                g_c = int(0xA3 + (0xDE - 0xA3) * frac)
+                b_c = int(0x4A + (0x80 - 0x4A) * frac)
+                color = f"#{r_c:02x}{g_c:02x}{b_c:02x}"
+            else:
+                # Default indigo → cyan gradient
+                r_c = int(self._ring_grad_start[0] + (self._ring_grad_end[0] - self._ring_grad_start[0]) * frac)
+                g_c = int(self._ring_grad_start[1] + (self._ring_grad_end[1] - self._ring_grad_start[1]) * frac)
+                b_c = int(self._ring_grad_start[2] + (self._ring_grad_end[2] - self._ring_grad_start[2]) * frac)
+                color = f"#{r_c:02x}{g_c:02x}{b_c:02x}"
+            half_step_angle = (360 / self._ring_steps) * 0.65
+            a1 = math.radians(-90 + frac * 360 - half_step_angle)
+            a2 = math.radians(-90 + frac * 360 + half_step_angle)
+            x1 = cx + r * math.cos(a1)
+            y1 = cy + r * math.sin(a1)
+            x2 = cx + r * math.cos(a2)
+            y2 = cy + r * math.sin(a2)
+            self.ring_canvas.coords(seg, x1, y1, x2, y2)
+            self.ring_canvas.itemconfig(seg, state="normal", fill=color)
+
+        label_color = "#4ADE80" if high_conf else self.accent_secondary
+        if hasattr(self, 'ring_value_label'):
+            self.ring_value_label.configure(
+                text=f"{int(percentage)}%",
+                text_color=label_color
             )
-        else:
-            # Switch to letter mode UI
-            self.letter_display.configure(text="-", text_color="#00FFCC")
-            self.conf_display.configure(text="Confidence: 0%")
-            self.stable_display.configure(text="Stability: 0/5")
-            self.stable_display.place(x=20, y=258)
-            self.word_mode_status.place_forget()
-            self.word_progress.place_forget()
-            self.word_info_label.configure(
-                text="📝 LETTER MODE — Sign individual letters to spell words"
-            )
+        if hasattr(self, 'conf_display'):
+            self.conf_display.configure(text_color=label_color)
 
-    # --------------------------------------------------
-    # Sentence controls
+    def draw_waveform(self, intensity):
+        self.wave_canvas.delete("all")
+        import random
+        for i in range(5):
+            h = 4 if intensity == 0 else random.randint(10, 35)
+            x = 10 + i * 18
+            y = 35 - h
+            self.wave_canvas.create_rectangle(x, y, x+10, 35, fill=self.accent_primary, outline="")
+
+    def set_target_word(self, new_word):
+        self.target_word = new_word
+        if len(self.displayed_word) > len(self.target_word):
+            self.displayed_word = self.target_word
+            self.word_display.configure(text=self.displayed_word)
+        if hasattr(self, 'typewriter_job') and self.typewriter_job:
+            self.root.after_cancel(self.typewriter_job)
+            self.typewriter_job = None
+        self.update_typewriter()
+
+    def update_typewriter(self):
+        if len(self.displayed_word) < len(self.target_word):
+            self.displayed_word = self.target_word[:len(self.displayed_word)+1]
+            self.word_display.configure(text=self.displayed_word)
+            self.typewriter_job = self.root.after(40, self.update_typewriter)
+
+    # Removed mode change logic since we are using unified Auto Mode
+
     def add_space(self):
         if not self.word.endswith(" "):
-            if self.auto_speak_var.get() and self.word.strip():
-                self.speak_word(self.word.split()[-1])
             self.word += " "
-            self.word_display.configure(text=self.word)
+            self.set_target_word(self.word)
             self.letter_buffer = []
+            self._mark_content_changed()
 
     def delete_last(self):
         if self.word:
             self.word = self.word[:-1]
-            self.word_display.configure(text=self.word)
+            self.set_target_word(self.word)
             self.letter_buffer = []
+
+    def delete_word(self):
+        """Delete the last word (or trailing space if cursor is after a space)."""
+        text = self.word.rstrip(" ")
+        if " " in text:
+            # Trim back to the end of the previous word, keeping one trailing space
+            self.word = text.rsplit(" ", 1)[0] + " "
+        else:
+            # Only one word left — clear it entirely
+            self.word = ""
+        self.set_target_word(self.word)
+        self.letter_buffer = []
 
     def clear_word(self):
         self.word = ""
+        self.set_target_word("")
         self.letter_buffer = []
-        self.word_display.configure(text="")
+
+    def _mark_content_changed(self):
+        """Re-enable Enhance Syntax whenever new content is added."""
+        if self._enhanced:
+            self._enhanced = False
+            if hasattr(self, 'enhance_btn'):
+                self.enhance_btn.configure(state="normal", fg_color=self.accent_primary)
+
+    def speak_out_loud(self):
+        """Speak whatever is currently in the output box."""
+        text = self.word.strip()
+        if text:
+            self.speak_word(text)
+
+    # --------------------------------------------------
+    # T5 Grammar Error Correction
+    # --------------------------------------------------
+    _GEC_MODEL_NAME = "prithivida/grammar_error_correcter_v1"
+
+    def _load_gec_model(self):
+        """Load T5-small GEC model in background. Runs on CPU for Jetson Nano compatibility."""
+        self._gec_model    = None
+        self._gec_tokenizer = None
+        self._gec_ready    = False
+        if not _TRANSFORMERS_AVAILABLE:
+            print("[GEC] transformers not installed — Enhance Syntax will use basic cleanup.")
+            self.root.after(0, self._gec_mark_unavailable)
+            return
+        try:
+            print("[GEC] Loading T5 grammar model…")
+            tok   = T5Tokenizer.from_pretrained(self._GEC_MODEL_NAME)
+            model = T5ForConditionalGeneration.from_pretrained(self._GEC_MODEL_NAME)
+            model.eval()  # inference-only mode, saves memory
+            self._gec_tokenizer = tok
+            self._gec_model     = model
+            self._gec_ready     = True
+            print("[GEC] T5 grammar model ready.")
+            self.root.after(0, self._gec_mark_ready)
+        except Exception as e:
+            print(f"[GEC] Model load failed: {e}")
+            self.root.after(0, self._gec_mark_unavailable)
+
+    def _gec_mark_ready(self):
+        if hasattr(self, 'enhance_btn'):
+            self.enhance_btn.configure(
+                state="normal",
+                fg_color=self.accent_primary,
+                text="\U0001fa84 Enhance Syntax"
+            )
+
+    def _gec_mark_unavailable(self):
+        if hasattr(self, 'enhance_btn'):
+            self.enhance_btn.configure(
+                text="\U0001fa84 Enhance (basic)",
+                state="normal",
+                fg_color=self.card_alt
+            )
+
+    def _gec_correct(self, text):
+        """Run Hybrid AI: local grammar_engine rules first, then T5 GEC cleanup."""
+        # 1. Run local NLP rules (grammar_engine)
+        try:
+            from grammar_engine import process_sentence
+            raw_tokens = text.split()
+            rule_based_result = process_sentence(raw_tokens)
+            if not rule_based_result:
+                rule_based_result = text.strip().lower()
+        except Exception as e:
+            print(f"[GEC] Rule engine error: {e}")
+            rule_based_result = text.strip().lower()
+
+        # 2. Run T5 inference to polish the result
+        if self._gec_ready and self._gec_model is not None:
+            try:
+                import torch
+                prompt = f"gec: {rule_based_result}"
+                inputs = self._gec_tokenizer(
+                    prompt, return_tensors="pt",
+                    max_length=128, truncation=True
+                )
+                with torch.no_grad():
+                    outputs = self._gec_model.generate(
+                        inputs["input_ids"],
+                        max_length=128,
+                        num_beams=4,
+                        early_stopping=True
+                    )
+                result = self._gec_tokenizer.decode(outputs[0], skip_special_tokens=True)
+                # Ensure first letter is capitalised
+                return result[0].upper() + result[1:] if result else rule_based_result.capitalize()
+            except Exception as e:
+                print(f"[GEC] Inference error: {e}")
+                
+        # Fallback: Just return rule engine result
+        return rule_based_result[0].upper() + rule_based_result[1:] if rule_based_result else ""
 
     def manual_speak(self):
         if not self.word.strip():
             return
-        
-        # 1. Split the raw string into tokens
-        raw_tokens = self.word.split()
-        
-        # 2. Pass the tokens through the offline grammar engine
-        corrected_sentence = process_sentence(raw_tokens)
-        
-        # 3. Update the UI display with the natural English sentence
-        self.word_display.configure(text=corrected_sentence)
-        
-        # 4. Speak the grammatically correct sentence
-        self.speak_word(corrected_sentence)
-        
-        # 5. Replace the raw buffer with the corrected sentence
-        self.word = corrected_sentence + " "
+        if self._enhanced:
+            return  # already enhanced — do nothing until new content added
+        # Disable button immediately; run inference in background so UI stays responsive
+        if hasattr(self, 'enhance_btn'):
+            self.enhance_btn.configure(state="disabled", fg_color=self.card_alt,
+                                       text="⏳ Enhancing…")
+        raw_text = self.word.strip()
 
-    # --------------------------------------------------
-    # Word mode: extract 150-dim feature vector from a frame
-    # --------------------------------------------------
+        def _run():
+            corrected = self._gec_correct(raw_text)
+            def _apply():
+                self.word = corrected + " "
+                self.set_target_word(self.word)
+                self._enhanced = True
+                if hasattr(self, 'enhance_btn'):
+                    self.enhance_btn.configure(
+                        state="disabled",
+                        fg_color=self.card_alt,
+                        text="\U0001fa84 Enhance Syntax"
+                    )
+            self.root.after(0, _apply)
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _extract_word_features(self, mp_image):
-        """Extract 150-dim hand+pose feature vector. Returns (vec, hand_detected)."""
         hand_result = self.hand_detector.detect(mp_image)
         pose_result = self.pose_detector.detect(mp_image)
-
         hand_detected = bool(hand_result.hand_landmarks)
 
-        # Hands: left (63) + right (63)
-        slots = {0: np.zeros(63, dtype=np.float32),
-                 1: np.zeros(63, dtype=np.float32)}
+        slots = {0: np.zeros(63, dtype=np.float32), 1: np.zeros(63, dtype=np.float32)}
         if hand_result.hand_landmarks:
             for hand, cat in zip(hand_result.hand_landmarks, hand_result.handedness):
                 side = 0 if cat[0].category_name == "Left" else 1
                 pts = np.array([[lm.x, lm.y, lm.z] for lm in hand], dtype=np.float32)
-                pts -= pts[0]  # wrist-relative
+                pts -= pts[0]
                 slots[side] = pts.flatten()
-        hand_vec = np.concatenate([slots[0], slots[1]])  # (126,)
+        hand_vec = np.concatenate([slots[0], slots[1]])
 
-        # Pose: 8 upper body landmarks (24)
         if pose_result.pose_landmarks:
             lms = pose_result.pose_landmarks[0]
-            pts = np.array([[lms[i].x, lms[i].y, lms[i].z]
-                            for i in POSE_IDXS], dtype=np.float32)
+            pts = np.array([[lms[i].x, lms[i].y, lms[i].z] for i in POSE_IDXS], dtype=np.float32)
             anchor = (pts[0] + pts[1]) / 2.0
             pts -= anchor
-            pose_vec = pts.flatten()  # (24,)
+            pose_vec = pts.flatten()
         else:
             pose_vec = np.zeros(24, dtype=np.float32)
 
-        return np.concatenate([hand_vec, pose_vec]), hand_detected  # (150,), bool
+        return np.concatenate([hand_vec, pose_vec]), hand_detected, hand_result
 
-    # --------------------------------------------------
+    def apply_video_effects(self, frame, hand_result):
+        return frame
+
+    def round_corners_pil(self, im, rad):
+        from PIL import ImageDraw, Image
+        circle = Image.new('L', (rad * 2, rad * 2), 0)
+        draw = ImageDraw.Draw(circle)
+        draw.ellipse((0, 0, rad * 2 - 1, rad * 2 - 1), fill=255)
+        alpha = Image.new('L', im.size, 255)
+        w, h = im.size
+        alpha.paste(circle.crop((0, 0, rad, rad)), (0, 0))
+        alpha.paste(circle.crop((0, rad, rad, rad * 2)), (0, h - rad))
+        alpha.paste(circle.crop((rad, 0, rad * 2, rad)), (w - rad, 0))
+        alpha.paste(circle.crop((rad, rad, rad * 2, rad * 2)), (w - rad, h - rad))
+        im.putalpha(alpha)
+        return im
+
     def update_video(self):
         ret, frame = self.cap.read()
-
         if not ret or frame is None:
-            self.video_label.configure(
-                text="❌ Camera not found!\nCheck connection or try a different USB port.\nRestart the app after reconnecting.",
-                image=""
-            )
+            self.video_label.configure(text="❌ Camera not found!", image="")
             self.root.after(1000, self.update_video)
             return
 
@@ -540,36 +672,59 @@ class SignLanguageApp:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
-        current_mode = self.mode_var.get()
+        hand_result = self._process_frame(mp_image)
 
-        if current_mode == "LETTER":
-            self._process_letter_mode(mp_image)
-        else:
-            self._process_word_mode(mp_image)
+        frame = self.apply_video_effects(frame, hand_result)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # Render frame
+        from PIL import Image
         img = Image.fromarray(rgb)
-        img = img.resize((640, 480))
-        imgtk = ctk.CTkImage(light_image=img, dark_image=img, size=(640, 480))
+        
+        # The video frame is sized to maintain 4:3, so simple fill — no bezels, no distortion, fast.
+        v_width = self.video_frame.winfo_width()
+        v_height = self.video_frame.winfo_height()
+        if v_width < 10 or v_height < 10:
+            v_width, v_height = 640, 480
+
+        img = img.resize((v_width, v_height))
+        img = self.round_corners_pil(img, 20)
+        imgtk = ctk.CTkImage(light_image=img, dark_image=img, size=(v_width, v_height))
         self.video_label.configure(text="", image=imgtk)
 
-        self.root.after(10, self.update_video)
 
-    # --------------------------------------------------
-    def _process_letter_mode(self, mp_image):
-        """Single-frame letter recognition (existing logic)."""
-        result = self.hand_detector.detect(mp_image)
+        self.root.after(15, self.update_video)
 
-        if result.hand_landmarks:
-            hand = result.hand_landmarks[0]
+    def _process_frame(self, mp_image):
+        now = time.time()
+        features, hand_detected, hand_result = self._extract_word_features(mp_image)
+
+        if not hand_detected:
+            self.stable_frames = 0
+            self.current_stable_letter = ""
+            self.word_recording = False
+            self.word_raw_buffer.clear()
+            if hasattr(self, 'word_progress'):
+                self.word_progress.set(0)
+            self.conf_display.configure(text="Confidence: 0%")
+            self.draw_confidence_ring(0)
+            if hasattr(self, 'auto_mode_status'):
+                self.auto_mode_status.configure(text="Waiting for sign...")
+            if len(self.letter_buffer) > 0 and (now - self.last_seen_time) > self.PAUSE_TIME:
+                self.letter_buffer = []
+            return hand_result
+
+        # --- LETTER EVALUATION ---
+        letter_conf = 0.0
+        letter_label = ""
+        
+        if hand_result.hand_landmarks:
+            hand = hand_result.hand_landmarks[0]
             wrist_x, wrist_y, wrist_z = hand[0].x, hand[0].y, hand[0].z
             landmarks = []
             for lm in hand:
                 landmarks.extend([lm.x - wrist_x, lm.y - wrist_y, lm.z - wrist_z])
 
             landmarks = np.array(landmarks, dtype=np.float32)
-
-            # Use scaler if available, otherwise fall back to per-sample max
             if self.scaler is not None:
                 landmarks = self.scaler.transform(landmarks.reshape(1, 63))
             else:
@@ -582,202 +737,125 @@ class SignLanguageApp:
             self.prediction_buffer.append(prediction)
 
             avg_pred = np.mean(self.prediction_buffer, axis=0)[0]
-            class_id = np.argmax(avg_pred)
-            confidence = np.max(avg_pred)
-            letter = self.actions[class_id]
+            letter_class_id = np.argmax(avg_pred)
+            letter_conf = np.max(avg_pred)
+            letter_label = self.actions[letter_class_id]
 
-            self.conf_display.configure(text=f"Confidence: {int(confidence * 100)}%")
-
-            if confidence > self.CONFIDENCE_THRESHOLD:
-                if letter == self.current_stable_letter:
-                    self.stable_frames += 1
-                else:
-                    self.current_stable_letter = letter
-                    self.stable_frames = 1
-
-                self.stable_display.configure(text=f"Stability: {self.stable_frames}/5")
-
-                if self.stable_frames == self.REQUIRED_FRAMES:
-                    self.letter_display.configure(text=letter)
-                    if len(self.letter_buffer) == 0 or letter != self.letter_buffer[-1]:
-                        self.letter_buffer.append(letter)
-                        self.word += letter
-                        self.word_display.configure(text=self.word)
-                    self.last_seen_time = time.time()
+        if letter_conf >= self.CONFIDENCE_THRESHOLD:
+            if letter_label == self.current_stable_letter:
+                self.stable_frames += 1
             else:
-                self.stable_frames = 0
+                self.current_stable_letter = letter_label
+                self.stable_frames = 1
+
+            if self.stable_frames == self.REQUIRED_FRAMES:
+                # EMIT LETTER
+                if len(self.letter_buffer) == 0 or letter_label != self.letter_buffer[-1]:
+                    self.letter_buffer.append(letter_label)
+                    self.word += letter_label
+                    self.set_target_word(self.word)
+                    self._mark_content_changed()
+                self.last_seen_time = now
+                
+                # RESET WORD RECORDING (User is holding a steady letter!)
+                self.word_recording = False
+                self.word_raw_buffer.clear()
+                if hasattr(self, 'word_progress'):
+                    self.word_progress.set(0)
+                if hasattr(self, 'auto_mode_status'):
+                    self.auto_mode_status.configure(text=f"Letter: {letter_label}")
+                
+                self.conf_display.configure(text=f"Confidence: {int(letter_conf * 100)}%")
+                self.draw_confidence_ring(int(letter_conf * 100))
+                return hand_result
         else:
             self.stable_frames = 0
-            self.current_stable_letter = ""
-            self.conf_display.configure(text="Confidence: 0%")
-            self.stable_display.configure(text="Stability: 0/5")
-            if len(self.letter_buffer) > 0 and (time.time() - self.last_seen_time) > self.PAUSE_TIME:
-                self.letter_buffer = []
-
-    # --------------------------------------------------
-    def _process_word_mode(self, mp_image):
-        """
-        Timed recording window approach — matches training preprocessing exactly.
-
-        Training (preprocess_words.py): reads ALL video frames, then evenly
-        subsamples to 30 using np.linspace across the full sign duration.
-
-        Real-time: collect ALL frames for RECORD_DURATION seconds (hands visible
-        OR not — the sign may end before hands drop), then evenly subsample to 30.
-        This ensures the temporal distribution matches training.
-        """
-        now = time.time()
-
-        # ── Cooldown: show result, wait before next recording ──────────────
+            
+        # --- WORD EVALUATION (Explicit Window) ---
         if now < self.word_cooldown_until:
-            return
+            if hasattr(self, 'auto_mode_status'):
+                self.auto_mode_status.configure(text="Cooldown...")
+            self.conf_display.configure(text=f"Confidence: {int(letter_conf * 100)}%")
+            self.draw_confidence_ring(int(letter_conf * 100))
+            return hand_result
 
-        # ── Not recording yet: wait for hand to appear, then auto-start ────
         if not self.word_recording:
-            features, hand_detected = self._extract_word_features(mp_image)
-            if hand_detected:
-                # Hand appeared — start recording
-                self.word_recording    = True
-                self.word_record_start = now
-                self.word_raw_buffer   = [features]
-                elapsed = 0.0
+            self.word_recording = True
+            self.word_record_start = now
+            self.word_raw_buffer = []
+            if hasattr(self, 'word_progress'):
                 self.word_progress.set(0)
-                self.word_mode_status.configure(
-                    text=f"🔴 Recording… 0.0 / {self.RECORD_DURATION:.1f}s")
-                self.letter_display.configure(text="…", text_color="#FF9F43")
-            else:
-                self.word_progress.set(0)
-                self.word_mode_status.configure(text="Show your hands to start recording")
-                self.letter_display.configure(text="—", text_color="#888888")
-                self.conf_display.configure(text="Confidence: —")
-            return
-
-        # ── Actively recording ─────────────────────────────────────────────
+            
         elapsed = now - self.word_record_start
         progress = min(1.0, elapsed / self.RECORD_DURATION)
-        self.word_progress.set(progress)
-        remaining = max(0.0, self.RECORD_DURATION - elapsed)
-        self.word_mode_status.configure(
-            text=f"🔴 Recording… {elapsed:.1f} / {self.RECORD_DURATION:.1f}s")
-
-        # Collect frame regardless of hand presence (sign may have just ended)
-        features, _ = self._extract_word_features(mp_image)
+        if hasattr(self, 'word_progress'):
+            self.word_progress.set(progress)
+        
         self.word_raw_buffer.append(features)
 
-        # ── Recording window complete ──────────────────────────────────────
-        if elapsed >= self.RECORD_DURATION:
+        if elapsed < self.RECORD_DURATION:
+            if hasattr(self, 'auto_mode_status'):
+                self.auto_mode_status.configure(text=f"🔴 Recording Word… {elapsed:.1f} / {self.RECORD_DURATION:.1f}s")
+            self.conf_display.configure(text=f"Confidence: {int(letter_conf * 100)}%")
+            self.draw_confidence_ring(int(letter_conf * 100))
+        else:
+            # End of window. Evaluate word.
             self.word_recording = False
             raw = self.word_raw_buffer
             self.word_raw_buffer = []
-
+            
             n_collected = len(raw)
-            if n_collected < 5:
-                self.letter_display.configure(text="?", text_color="#888888")
-                self.word_mode_status.configure(text="Too few frames — show hands and try again")
-                self.word_cooldown_until = now + 1.0
-                return
+            if n_collected >= 5:
+                idxs = np.linspace(0, n_collected - 1, WORD_FRAMES, dtype=int)
+                seq  = np.array([raw[i] for i in idxs], dtype=np.float32)
+                if self.word_scaler is not None:
+                    flat = self.word_scaler.transform(seq.reshape(1, -1))
+                    seq  = flat.reshape(1, WORD_FRAMES, 150)
+                else:
+                    seq = seq.reshape(1, WORD_FRAMES, 150)
 
-            # ── Evenly subsample to WORD_FRAMES — identical to training ──
-            idxs = np.linspace(0, n_collected - 1, WORD_FRAMES, dtype=int)
-            seq  = np.array([raw[i] for i in idxs], dtype=np.float32)  # (30, 150)
+                probs     = self.word_model.predict(seq, verbose=0)[0]
+                class_id  = int(np.argmax(probs))
+                word_confidence = float(probs[class_id])
+                word_label = self.word_labels[str(class_id)]
 
-            # ── Normalise (same as training) ──────────────────────────────
-            if self.word_scaler is not None:
-                flat = self.word_scaler.transform(seq.reshape(1, -1))
-                seq  = flat.reshape(1, WORD_FRAMES, 150)
-            else:
-                seq = seq.reshape(1, WORD_FRAMES, 150)
+                entropy     = -np.sum(probs * np.log(probs + 1e-9))
+                max_entropy = np.log(len(probs))
+                
+                if entropy <= 0.75 * max_entropy and word_confidence > 0.80:
+                    # Emit Word!
+                    self.conf_display.configure(text=f"Word Conf: {int(word_confidence * 100)}%")
+                    self.draw_confidence_ring(int(word_confidence * 100))
+                    if hasattr(self, 'auto_mode_status'):
+                        self.auto_mode_status.configure(text=f"✅ {word_label}")
+                    
+                    self.word += word_label + " "
+                    self.set_target_word(self.word)
+                    self._mark_content_changed()
 
-            # ── Predict ───────────────────────────────────────────────────
-            probs     = self.word_model.predict(seq, verbose=0)[0]
-            class_id  = int(np.argmax(probs))
-            confidence = float(probs[class_id])
-            word_label = self.word_labels[str(class_id)]
+                    self.word_cooldown_until = now + 1.5
+                    return hand_result
 
-            # Entropy guard: reject if model is spread across all classes
-            entropy     = -np.sum(probs * np.log(probs + 1e-9))
-            max_entropy = np.log(len(probs))
-            if entropy > 0.75 * max_entropy:
-                self.letter_display.configure(text="?", text_color="#888888")
-                self.conf_display.configure(text="Uncertain — try again")
-                self.word_mode_status.configure(text="Not recognised — sign more clearly")
-                self.word_cooldown_until = now + 1.5
-                return
+            # If we didn't emit a Word
+            if hasattr(self, 'auto_mode_status'):
+                self.auto_mode_status.configure(text="Not recognised.")
+            
+            # Start recording the next window immediately
+            self.word_recording = True
+            self.word_record_start = now
+            self.word_raw_buffer = [features]
+            if hasattr(self, 'word_progress'):
+                self.word_progress.set(0)
 
-            self.last_word_prediction  = word_label
-            self.last_word_confidence  = confidence
+        return hand_result
 
-            col = "#00FFCC" if confidence > 0.80 else "#FF9F43"
-            self.letter_display.configure(text=word_label, text_color=col)
-            self.conf_display.configure(text=f"Confidence: {int(confidence * 100)}%")
-            self.word_mode_status.configure(
-                text=f"✅ {word_label}  ({n_collected} frames collected)" if confidence > 0.80
-                     else f"⚠️  {word_label} — low confidence, try again"
-            )
-            self.word_progress.set(1.0)
-
-            if confidence > 0.80:
-                self.word += word_label + " "
-                self.word_display.configure(text=self.word)
-                if self.auto_speak_var.get():
-                    self.speak_word(word_label)
-
-            # Brief pause before next recording window opens
-            self.word_cooldown_until = now + 1.5
-
-    # --------------------------------------------------
-    def start_local_web_server(self):
-        def run():
-            try:
-                # Bind to 127.0.0.1 (loopback only) — NOT 0.0.0.0.
-                # This ensures the server is invisible to other devices on the LAN.
-                self.web_server = HTTPServer(('127.0.0.1', 5892), LocalHTTPServer)
-                self.web_server.app_instance = self
-                self.web_server.serve_forever()
-            except Exception as e:
-                print(f"⚠️ Web server failed to start: {e}")
-        server_thread = threading.Thread(target=run, daemon=True)
-        server_thread.start()
-
-    # Deployed GitHub Pages URL — update this if the repo name changes
-    ONLINE_AI_URL = "https://j-a-co-b.github.io/SignToSound_Invicti/online_mode/"
-
-    def open_online_ai(self):
-        current_text = self.word.strip()
-        encoded_text = quote(current_text)
-        url = f"{self.ONLINE_AI_URL}?text={encoded_text}"
-        try:
-            webbrowser.open(url)
-        except Exception as e:
-            print(f"Error opening browser: {e}")
-
-    def update_text_from_web(self, text):
-        def _update():
-            self.word = text + " " if text else ""
-            self.word_display.configure(text=self.word)
-            self.letter_buffer = []
-        self.root.after(0, _update)
-
-    # --------------------------------------------------
     def on_close(self):
         try:
             self.parent_conn.send("STOP")
         except:
             pass
-        # Shutdown web server
-        if hasattr(self, "web_server") and self.web_server:
-            try:
-                self.web_server.shutdown()
-                self.web_server.server_close()
-            except Exception as e:
-                print(f"Error shutting down web server: {e}")
         self.cap.release()
         self.root.destroy()
-
-
-# ==================================================
-# 3. RUN
-# ==================================================
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     app_root = ctk.CTk()
