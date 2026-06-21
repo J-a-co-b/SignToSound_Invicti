@@ -25,7 +25,21 @@ import mediapipe as mp
 from collections import deque
 import customtkinter as ctk
 from PIL import Image, ImageTk
-import joblib
+# joblib kept for fallback only
+try:
+    import joblib as _joblib
+except ImportError:
+    _joblib = None
+
+
+class _NumpyScaler:
+    """Minimal StandardScaler replacement using only numpy — no sklearn needed."""
+    def __init__(self, mean, scale):
+        self.mean_ = mean
+        self.scale_ = scale
+
+    def transform(self, X):
+        return (X - self.mean_) / self.scale_
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -163,10 +177,21 @@ class SignLanguageApp:
                 pass
 
         # --- LOAD SCALERS ---
-        scaler_path = os.path.join(os.getcwd(), "scaler.pkl")
-        self.scaler = joblib.load(scaler_path) if os.path.exists(scaler_path) else None
-        word_scaler_path = os.path.join(os.getcwd(), "word_scaler.pkl")
-        self.word_scaler = joblib.load(word_scaler_path) if os.path.exists(word_scaler_path) else None
+        def _load_scaler(npz_name, pkl_name):
+            npz_path = os.path.join(os.getcwd(), npz_name)
+            if os.path.exists(npz_path):
+                d = np.load(npz_path)
+                return _NumpyScaler(d['mean'], d['scale'])
+            pkl_path = os.path.join(os.getcwd(), pkl_name)
+            if os.path.exists(pkl_path) and _joblib is not None:
+                try:
+                    return _joblib.load(pkl_path)
+                except Exception:
+                    pass
+            return None
+
+        self.scaler      = _load_scaler('scaler.npz', 'scaler.pkl')
+        self.word_scaler = _load_scaler('word_scaler.npz', 'word_scaler.pkl')
 
         # --- LOAD MEDIAPIPE DETECTORS ---
         SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
