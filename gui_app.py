@@ -1,5 +1,6 @@
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Silence TF/CUDA verbose logs
+os.environ['XLIB_SKIP_ARGB_VISUALS'] = '1' # Fix X11 BadLength RenderAddGlyphs error
 import math
 import threading
 try:
@@ -274,10 +275,10 @@ class SignLanguageApp:
             self.draw_waveform(0)
 
     def build_ui(self):
-        self.f_title = ("Segoe UI", 24, "bold")
-        self.f_header = ("Segoe UI", 16, "bold")
-        self.f_body = ("Segoe UI", 14)
-        self.f_large = ("Segoe UI", 48, "bold")
+        self.f_title = ("TkDefaultFont", 24, "bold")
+        self.f_header = ("TkDefaultFont", 16, "bold")
+        self.f_body = ("TkDefaultFont", 14)
+        self.f_large = ("TkDefaultFont", 48, "bold")
         
         # Size the video column to maintain 4:3 aspect ratio based on available window height.
         # This keeps the camera view natural (no zoom) and lets the right panel expand freely.
@@ -337,7 +338,7 @@ class SignLanguageApp:
 
         # Percentage label embedded inside the ring canvas (no clipping possible)
         self.ring_value_label = ctk.CTkLabel(
-            self.ring_canvas, text="0%", font=("Segoe UI", 26, "bold"),
+            self.ring_canvas, text="0%", font=("TkDefaultFont", 26, "bold"),
             text_color=self.accent_secondary, fg_color=self.card_color
         )
         self.ring_canvas.create_window(75, 75, window=self.ring_value_label)
@@ -419,7 +420,7 @@ class SignLanguageApp:
         ctk.CTkLabel(self.bottom_frame, text="Live Output:", font=self.f_header).place(x=20, y=20)
         self.word_display = ctk.CTkLabel(
             self.bottom_frame, text="",
-            font=("Segoe UI", 32, "bold"), text_color="#E3B341", justify="left"
+            font=("TkDefaultFont", 32, "bold"), text_color="#E3B341", justify="left"
         )
         self.word_display.place(x=20, y=60)
         
