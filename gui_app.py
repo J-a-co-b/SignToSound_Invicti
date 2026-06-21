@@ -274,10 +274,10 @@ class SignLanguageApp:
             self.draw_waveform(0)
 
     def build_ui(self):
-        self.f_title = ("Segoe UI", 24, "bold")
-        self.f_header = ("Segoe UI", 16, "bold")
-        self.f_body = ("Segoe UI", 14)
-        self.f_large = ("Segoe UI", 48, "bold")
+        self.f_title = ("DejaVu Sans", 24, "bold")
+        self.f_header = ("DejaVu Sans", 16, "bold")
+        self.f_body = ("DejaVu Sans", 14)
+        self.f_large = ("DejaVu Sans", 48, "bold")
         
         # Size the video column to maintain 4:3 aspect ratio based on available window height.
         # This keeps the camera view natural (no zoom) and lets the right panel expand freely.
@@ -337,7 +337,7 @@ class SignLanguageApp:
 
         # Percentage label embedded inside the ring canvas (no clipping possible)
         self.ring_value_label = ctk.CTkLabel(
-            self.ring_canvas, text="0%", font=("Segoe UI", 26, "bold"),
+            self.ring_canvas, text="0%", font=("DejaVu Sans", 26, "bold"),
             text_color=self.accent_secondary, fg_color=self.card_color
         )
         self.ring_canvas.create_window(75, 75, window=self.ring_value_label)
@@ -419,7 +419,7 @@ class SignLanguageApp:
         ctk.CTkLabel(self.bottom_frame, text="Live Output:", font=self.f_header).place(x=20, y=20)
         self.word_display = ctk.CTkLabel(
             self.bottom_frame, text="",
-            font=("Segoe UI", 32, "bold"), text_color="#E3B341", justify="left"
+            font=("DejaVu Sans", 32, "bold"), text_color="#E3B341", justify="left"
         )
         self.word_display.place(x=20, y=60)
         
