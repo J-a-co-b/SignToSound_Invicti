@@ -105,7 +105,15 @@ class SignLanguageApp:
             Dense(24, activation='softmax'),
         ])
         self.model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-        self.model.load_weights('sign_language_model.weights.h5')
+        try:
+            w_data = np.load('sign_language_model_weights.npz')
+            self.model.set_weights([w_data[f"arr_{i}"] for i in range(len(w_data.files))])
+        except Exception as e:
+            print(f"Fallback/Error loading letter weights: {e}")
+            try:
+                self.model.load_weights('sign_language_model.weights.h5')
+            except:
+                pass
         self.actions = np.array(['A','B','C','D','E','F','G','H','I',
                                   'K','L','M','N','O','P','Q','R','S',
                                   'T','U','V','W','X','Y'])
@@ -144,7 +152,15 @@ class SignLanguageApp:
         out = Dense(n_classes, activation="softmax", name="predictions")(x)
         self.word_model = Model(inp, out, name="SignToSound_Word")
         self.word_model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
-        self.word_model.load_weights("word_model.weights.h5")
+        try:
+            w_data = np.load('word_model_weights.npz')
+            self.word_model.set_weights([w_data[f"arr_{i}"] for i in range(len(w_data.files))])
+        except Exception as e:
+            print(f"Fallback/Error loading word weights: {e}")
+            try:
+                self.word_model.load_weights("word_model.weights.h5")
+            except:
+                pass
 
         # --- LOAD SCALERS ---
         scaler_path = os.path.join(os.getcwd(), "scaler.pkl")
