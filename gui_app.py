@@ -13,8 +13,12 @@ import time
 import platform
 import multiprocessing
 import pyttsx3
-import tensorflow as tf
-
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import (
+    Input, Dense, BatchNormalization, Dropout, Activation,
+    SeparableConv1D, GlobalAveragePooling1D
+)
+from tensorflow.keras.regularizers import l2
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import mediapipe as mp
@@ -90,10 +94,18 @@ class SignLanguageApp:
         self.proc.start()
 
         # --- LOAD LETTER MODEL ---
-        self.model = tf.lite.Interpreter(model_path="sign_language_model.tflite")
-        self.model.allocate_tensors()
-        self.letter_input_details = self.model.get_input_details()
-        self.letter_output_details = self.model.get_output_details()
+        self.model = Sequential([
+            Dense(128, activation='relu', input_shape=(63,)),
+            BatchNormalization(momentum=0.99, epsilon=0.001),
+            Dropout(0.3),
+            Dense(64, activation='relu'),
+            BatchNormalization(momentum=0.99, epsilon=0.001),
+            Dropout(0.2),
+            Dense(32, activation='relu'),
+            Dense(24, activation='softmax'),
+        ])
+        self.model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+        self.model.load_weights('sign_language_model.weights.h5')
         self.actions = np.array(['A','B','C','D','E','F','G','H','I',
                                   'K','L','M','N','O','P','Q','R','S',
                                   'T','U','V','W','X','Y'])
@@ -104,10 +116,35 @@ class SignLanguageApp:
         self.word_list = [self.word_labels[str(i)] for i in range(len(self.word_labels))]
         n_classes = len(self.word_labels)
 
-        self.word_model = tf.lite.Interpreter(model_path="word_model.tflite")
-        self.word_model.allocate_tensors()
-        self.word_input_details = self.word_model.get_input_details()
-        self.word_output_details = self.word_model.get_output_details()
+        inp = Input(shape=(WORD_FRAMES, 150), name="landmarks")
+        x = SeparableConv1D(64, kernel_size=3, padding="same",
+                            depthwise_regularizer=l2(1e-4),
+                            pointwise_regularizer=l2(1e-4),
+                            name="sep_conv1")(inp)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+        x = Dropout(0.25)(x)
+        x = SeparableConv1D(64, kernel_size=5, padding="same",
+                            depthwise_regularizer=l2(1e-4),
+                            pointwise_regularizer=l2(1e-4),
+                            name="sep_conv2")(x)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+        x = Dropout(0.25)(x)
+        x = SeparableConv1D(32, kernel_size=7, padding="same",
+                            depthwise_regularizer=l2(1e-4),
+                            pointwise_regularizer=l2(1e-4),
+                            name="sep_conv3")(x)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+        x = Dropout(0.20)(x)
+        x = GlobalAveragePooling1D()(x)
+        x = Dense(64, activation="relu", kernel_regularizer=l2(1e-4))(x)
+        x = Dropout(0.25)(x)
+        out = Dense(n_classes, activation="softmax", name="predictions")(x)
+        self.word_model = Model(inp, out, name="SignToSound_Word")
+        self.word_model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
+        self.word_model.load_weights("word_model.weights.h5")
 
         # --- LOAD SCALERS ---
         scaler_path = os.path.join(os.getcwd(), "scaler.pkl")
@@ -696,9 +733,7 @@ class SignLanguageApp:
                     landmarks /= max_val
                 landmarks = landmarks.reshape(1, 63)
 
-            self.model.set_tensor(self.letter_input_details[0]['index'], landmarks)
-            self.model.invoke()
-            prediction = self.model.get_tensor(self.letter_output_details[0]['index'])
+            prediction = self.model.predict(landmarks, verbose=0)
             self.prediction_buffer.append(prediction)
 
             avg_pred = np.mean(self.prediction_buffer, axis=0)[0]
@@ -779,9 +814,7 @@ class SignLanguageApp:
                 else:
                     seq = seq.reshape(1, WORD_FRAMES, 150)
 
-                self.word_model.set_tensor(self.word_input_details[0]['index'], seq)
-                self.word_model.invoke()
-                probs     = self.word_model.get_tensor(self.word_output_details[0]['index'])[0]
+                probs     = self.word_model.predict(seq, verbose=0)[0]
                 class_id  = int(np.argmax(probs))
                 word_confidence = float(probs[class_id])
                 word_label = self.word_labels[str(class_id)]
