@@ -218,7 +218,7 @@ class SignLanguageApp:
         self.emitted_letters = []
 
         # --- LETTER MODE VARIABLES ---
-        self.prediction_buffer = deque(maxlen=5)
+        self.prediction_buffer = deque(maxlen=8)
         self.current_stable_letter = ""
         self.stable_frames = 0
         self.CONFIDENCE_THRESHOLD = 0.80
