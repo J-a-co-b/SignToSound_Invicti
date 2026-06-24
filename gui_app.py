@@ -201,7 +201,7 @@ class SignLanguageApp:
         hand_model_path = os.path.join(SCRIPT_DIR, "hand_landmarker.task")
         hand_options = vision.HandLandmarkerOptions(
             base_options=python.BaseOptions(model_asset_path=hand_model_path),
-            num_hands=2
+            num_hands=1
         )
         self.hand_detector = vision.HandLandmarker.create_from_options(hand_options)
 
@@ -241,6 +241,7 @@ class SignLanguageApp:
         # --- CAMERA ---
         self.cap = self._open_camera()
 
+        self._frame_counter = 0
         self.build_ui()
         self.update_video()
         # Load GEC model in the background so the UI opens instantly
@@ -716,7 +717,14 @@ class SignLanguageApp:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
-        hand_result = self._process_frame(mp_image)
+        self._frame_counter += 1
+        run_inference = (self._frame_counter % 2 == 0)  # Run AI every 2nd frame
+
+        if run_inference:
+            hand_result = self._process_frame(mp_image)
+        else:
+            hand_result = getattr(self, '_last_hand_result', None)
+        self._last_hand_result = hand_result
 
         frame = self.apply_video_effects(frame, hand_result)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -735,8 +743,7 @@ class SignLanguageApp:
         imgtk = ctk.CTkImage(light_image=img, dark_image=img, size=(v_width, v_height))
         self.video_label.configure(text="", image=imgtk)
 
-
-        self.root.after(15, self.update_video)
+        self.root.after(50, self.update_video)  # Target ~20fps to reduce CPU load
 
     def _process_frame(self, mp_image):
         now = time.time()
