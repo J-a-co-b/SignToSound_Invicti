@@ -201,7 +201,7 @@ class SignLanguageApp:
         hand_model_path = os.path.join(SCRIPT_DIR, "hand_landmarker.task")
         hand_options = vision.HandLandmarkerOptions(
             base_options=python.BaseOptions(model_asset_path=hand_model_path),
-            num_hands=1
+            num_hands=2
         )
         self.hand_detector = vision.HandLandmarker.create_from_options(hand_options)
 
@@ -241,6 +241,10 @@ class SignLanguageApp:
         # --- CAMERA ---
         self.cap = self._open_camera()
 
+        # Adaptive performance: slower loop + frame-skipped inference on Jetson ARM64
+        _is_jetson = platform.machine() == 'aarch64'
+        self._loop_delay   = 50 if _is_jetson else 15   # ms between frames
+        self._infer_every  = 2  if _is_jetson else 1    # run AI every N frames
         self._frame_counter = 0
         self.build_ui()
         self.update_video()
@@ -718,7 +722,7 @@ class SignLanguageApp:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
         self._frame_counter += 1
-        run_inference = (self._frame_counter % 2 == 0)  # Run AI every 2nd frame
+        run_inference = (self._frame_counter % self._infer_every == 0)
 
         if run_inference:
             hand_result = self._process_frame(mp_image)
@@ -743,7 +747,7 @@ class SignLanguageApp:
         imgtk = ctk.CTkImage(light_image=img, dark_image=img, size=(v_width, v_height))
         self.video_label.configure(text="", image=imgtk)
 
-        self.root.after(50, self.update_video)  # Target ~20fps to reduce CPU load
+        self.root.after(self._loop_delay, self.update_video)
 
     def _process_frame(self, mp_image):
         now = time.time()
