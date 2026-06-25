@@ -587,15 +587,15 @@
             left: 0;
             width: 100vw;
             height: 100vh;
-            background: rgba(2, 6, 23, 0.8);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
+            background: rgba(2, 6, 23, 0.85);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
             z-index: 100;
             display: none;
             align-items: center;
             justify-content: center;
             opacity: 0;
-            transition: opacity 0.3s ease;
+            transition: opacity 0.4s ease;
         }
 
         .modal-overlay.active {
@@ -604,70 +604,228 @@
         }
 
         .modal-card {
-            background: rgba(30, 41, 59, 0.7);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
             border-radius: var(--radius-lg);
             width: 90%;
-            max-width: 500px;
-            padding: 32px;
-            transform: translateY(20px);
-            transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+            max-width: 480px;
+            padding: 40px;
+            transform: translateY(30px) scale(0.95);
+            transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .modal-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 4px;
+            background: linear-gradient(90deg, var(--primary), var(--secondary), var(--accent));
+        }
+
+        .modal-card::after {
+            content: '';
+            position: absolute;
+            top: -50px;
+            right: -50px;
+            width: 150px;
+            height: 150px;
+            background: radial-gradient(circle, rgba(168, 85, 247, 0.15) 0%, transparent 70%);
+            border-radius: 50%;
+            pointer-events: none;
         }
 
         .modal-overlay.active .modal-card {
-            transform: translateY(0);
+            transform: translateY(0) scale(1);
+        }
+
+        .modal-header {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        
+        .modal-header-icon {
+            width: 48px;
+            height: 48px;
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--primary);
+            box-shadow: 0 0 20px rgba(99, 102, 241, 0.15);
         }
 
         .modal-title {
             font-family: 'Outfit', sans-serif;
-            font-size: 22px;
+            font-size: 24px;
             font-weight: 700;
-            margin-bottom: 12px;
+            margin: 0;
+            background: linear-gradient(135deg, #fff 0%, #cbd5e1 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
         }
 
         .modal-description {
-            font-size: 14px;
+            font-size: 15px;
             color: var(--text-secondary);
-            line-height: 1.5;
-            margin-bottom: 24px;
+            line-height: 1.6;
+            margin-bottom: 32px;
         }
 
         .form-group {
             display: flex;
             flex-direction: column;
-            gap: 8px;
-            margin-bottom: 20px;
+            gap: 10px;
+            margin-bottom: 24px;
+            position: relative;
+            z-index: 1;
         }
 
         .form-group label {
-            font-size: 12px;
+            font-size: 13px;
             font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.8px;
             color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .input-wrapper {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .input-icon {
+            position: absolute;
+            left: 16px;
+            color: var(--text-muted);
+            pointer-events: none;
         }
 
         .form-group input {
-            background: rgba(15, 23, 42, 0.6);
-            border: 1px solid var(--card-border);
-            border-radius: var(--radius-sm);
-            padding: 12px 16px;
+            width: 100%;
+            background: rgba(15, 23, 42, 0.5);
+            border: 2px solid transparent;
+            border-radius: var(--radius-md);
+            padding: 14px 16px 14px 44px;
             color: var(--text-primary);
-            font-size: 15px;
+            font-size: 16px;
+            font-family: 'Inter', sans-serif;
             outline: none;
             transition: var(--transition-smooth);
+            box-shadow: 0 0 0 1px var(--card-border) inset;
         }
 
         .form-group input:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 10px rgba(99, 102, 241, 0.2);
+            background: rgba(15, 23, 42, 0.8);
+            border-color: transparent;
+            box-shadow: 0 0 0 2px var(--primary) inset, 0 0 20px rgba(99, 102, 241, 0.2);
+        }
+        
+        .form-group input::placeholder {
+            color: rgba(100, 116, 139, 0.5);
+        }
+
+        .toggle-password {
+            position: absolute;
+            right: 16px;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: color 0.2s;
+            outline: none;
+        }
+
+        .toggle-password:hover {
+            color: var(--text-primary);
+        }
+
+        .api-help-text {
+            color: var(--text-muted);
+            font-size: 13px;
+            margin-top: 8px;
+            line-height: 1.5;
+            background: rgba(255,255,255,0.02);
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        .api-help-text a {
+            color: var(--primary);
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .api-help-text a:hover {
+            color: var(--primary-hover);
+            text-decoration: underline;
         }
 
         .modal-buttons {
             display: flex;
             justify-content: flex-end;
-            gap: 12px;
+            gap: 16px;
+            margin-top: 36px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .btn-modal-cancel {
+            background: transparent;
+            border: 1px solid var(--card-border);
+            color: var(--text-primary);
+            padding: 12px 24px;
+            border-radius: var(--radius-sm);
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--transition-smooth);
+            font-family: 'Inter', sans-serif;
+            font-size: 14px;
+        }
+
+        .btn-modal-cancel:hover {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: rgba(255,255,255,0.3);
+        }
+
+        .btn-modal-save {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            border: none;
+            color: white;
+            padding: 12px 28px;
+            border-radius: var(--radius-sm);
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+            transition: var(--transition-smooth);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-family: 'Inter', sans-serif;
+            font-size: 14px;
+        }
+
+        .btn-modal-save:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
         }
 
         /* Toast Notifications */
@@ -868,23 +1026,54 @@
     <!-- Config Modal -->
     <div class="modal-overlay" id="settings-modal">
         <div class="modal-card">
-            <h3 class="modal-title">Cloud AI Configuration</h3>
-            <p class="modal-description">This application uses Google Gemini Flash model to analyze and structure sign
-                gestures into perfect grammar. Input your Gemini API key below.</p>
+            <div class="modal-header">
+                <div class="modal-header-icon">
+                    <svg class="icon-inline" viewBox="0 0 24 24" style="width:24px;height:24px;">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                    </svg>
+                </div>
+                <h3 class="modal-title">Cloud AI Config</h3>
+            </div>
+            
+            <p class="modal-description">
+                This application uses Google's Gemini Flash model to analyze and structure sign gestures into perfect grammar. Input your Gemini API key below to unlock AI enhancements.
+            </p>
 
             <div class="form-group">
-                <label for="input-api-key">Gemini API Key</label>
-                <input type="password" id="input-api-key" placeholder="AIzaSy...">
-                <small style="color:var(--text-muted); font-size:11px; margin-top:4px; line-height:1.4;">
-                    Your key is saved locally in your browser (localStorage). Get a free key from the <a
-                        href="https://aistudio.google.com/" target="_blank"
-                        style="color:var(--primary); text-decoration:none;">Google AI Studio</a>.
-                </small>
+                <label for="input-api-key">
+                    <svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                    </svg>
+                    Gemini API Key
+                </label>
+                <div class="input-wrapper">
+                    <svg class="icon-inline input-icon" viewBox="0 0 24 24">
+                        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>
+                    </svg>
+                    <input type="password" id="input-api-key" placeholder="AIzaSy...">
+                    <button type="button" class="toggle-password" id="btn-toggle-password" title="Toggle visibility">
+                        <svg class="icon-inline" viewBox="0 0 24 24" id="eye-icon">
+                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                            <circle cx="12" cy="12" r="3"></circle>
+                        </svg>
+                    </button>
+                </div>
+                <div class="api-help-text">
+                    Your key is saved locally in your browser and never sent to our servers. Get a free key from <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a>.
+                </div>
             </div>
 
             <div class="modal-buttons">
-                <button class="btn btn-secondary" id="btn-close-settings">Cancel</button>
-                <button class="btn btn-primary" id="btn-save-settings">Save Config</button>
+                <button class="btn-modal-cancel" id="btn-close-settings">Cancel</button>
+                <button class="btn-modal-save" id="btn-save-settings">
+                    <svg class="icon-inline" viewBox="0 0 24 24" style="width:18px;height:18px;">
+                        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                        <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                        <polyline points="7 3 7 8 15 8"></polyline>
+                    </svg>
+                    Save Config
+                </button>
             </div>
         </div>
     </div>
@@ -915,6 +1104,8 @@
         const btnCloseSettings = document.getElementById("btn-close-settings");
         const btnSaveSettings = document.getElementById("btn-save-settings");
         const inputApiKey = document.getElementById("input-api-key");
+        const btnTogglePassword = document.getElementById("btn-toggle-password");
+        const eyeIcon = document.getElementById("eye-icon");
 
         const confidenceBadge = document.getElementById("confidence-badge");
         const confidenceVal = document.getElementById("confidence-val");
@@ -978,6 +1169,19 @@
         btnCloseSettings.addEventListener("click", () => {
             settingsModal.classList.remove("active");
         });
+
+        if (btnTogglePassword) {
+            btnTogglePassword.addEventListener("click", () => {
+                const type = inputApiKey.getAttribute("type") === "password" ? "text" : "password";
+                inputApiKey.setAttribute("type", type);
+                
+                if (type === "text") {
+                    eyeIcon.innerHTML = `<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line>`;
+                } else {
+                    eyeIcon.innerHTML = `<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle>`;
+                }
+            });
+        }
 
         btnSaveSettings.addEventListener("click", () => {
             const val = inputApiKey.value.trim();

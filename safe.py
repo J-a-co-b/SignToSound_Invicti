@@ -1,10 +1,5 @@
 import math
-import threading
-try:
-    from transformers import T5ForConditionalGeneration, T5Tokenizer
-    _TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    _TRANSFORMERS_AVAILABLE = False
+from grammar_engine import process_sentence
 import cv2
 import numpy as np
 import os
@@ -177,7 +172,7 @@ class SignLanguageApp:
         self.prediction_buffer = deque(maxlen=5)
         self.current_stable_letter = ""
         self.stable_frames = 0
-        self.CONFIDENCE_THRESHOLD = 0.80
+        self.CONFIDENCE_THRESHOLD = 0.70
         self.REQUIRED_FRAMES = 5
         self.letter_buffer = []
         self.word = ""
@@ -199,8 +194,6 @@ class SignLanguageApp:
 
         self.build_ui()
         self.update_video()
-        # Load GEC model in the background so the UI opens instantly
-        threading.Thread(target=self._load_gec_model, daemon=True).start()
 
     def _open_camera(self):
         backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_ANY
@@ -360,13 +353,12 @@ class SignLanguageApp:
                       command=self.clear_word, fg_color="#E5484D", width=0
                       ).pack(side="left", expand=True, fill="x", padx=(4, 0))
 
-        # ── Button row 2: Enhance (starts disabled until T5 loads) ──
+        # ── Button row 2: Enhance (only) ──
         btn_row2 = ctk.CTkFrame(self.info_frame, fg_color="transparent")
         btn_row2.pack(pady=(8, 0), padx=20, fill="x")
         self.enhance_btn = ctk.CTkButton(
-            btn_row2, text="⏳ Loading AI…", font=self.f_body,
-            command=self.manual_speak, fg_color=self.card_alt,
-            state="disabled", width=0
+            btn_row2, text="\U0001fa84 Enhance Syntax", font=self.f_body,
+            command=self.manual_speak, fg_color=self.accent_primary, width=0
         )
         self.enhance_btn.pack(side="left", expand=True, fill="x")
 
@@ -393,7 +385,7 @@ class SignLanguageApp:
         ctk.CTkLabel(self.bottom_frame, text="Live Output:", font=self.f_header).place(x=20, y=20)
         self.word_display = ctk.CTkLabel(
             self.bottom_frame, text="",
-            font=("Segoe UI", 32, "bold"), text_color="#E3B341", justify="left", wraplength=900
+            font=("Segoe UI", 32, "bold"), text_color="#E3B341", justify="left"
         )
         self.word_display.place(x=20, y=60)
         
@@ -410,34 +402,24 @@ class SignLanguageApp:
 
     def draw_confidence_ring(self, percentage):
         """Draws a smooth gradient ring sweeping clockwise from the top (12 o'clock).
-        Turns green when percentage >= 80, otherwise indigo-to-cyan gradient."""
+        Each thin line segment is repositioned every call along the circle's
+        circumference and only as many segments as the percentage requires are
+        shown — giving a continuous, seamless gradient arc with no visible gaps."""
         if not hasattr(self, 'ring_segments'):
             return
         percentage = max(0, min(100, percentage))
         visible_steps = round((percentage / 100) * self._ring_steps)
-        high_conf = percentage >= 80
 
         cx, cy, r = self._ring_cx, self._ring_cy, self._ring_r
         for i, seg in enumerate(self.ring_segments):
             if i >= visible_steps:
                 self.ring_canvas.itemconfig(seg, state="hidden")
                 continue
+            # Sweep clockwise starting from 12 o'clock (-90deg in standard math angle)
             frac = i / (self._ring_steps - 1)
-            if high_conf:
-                # Solid green gradient: dark green → bright green
-                g_val = int(160 + 74 * frac)   # 160 → 234
-                color = f"#22{g_val:02x}5E".replace("5E", f"{int(60 + 38*frac):02x}")
-                # Simpler: blend #16A34A → #4ADE80
-                r_c = int(0x16 + (0x4A - 0x16) * frac)
-                g_c = int(0xA3 + (0xDE - 0xA3) * frac)
-                b_c = int(0x4A + (0x80 - 0x4A) * frac)
-                color = f"#{r_c:02x}{g_c:02x}{b_c:02x}"
-            else:
-                # Default indigo → cyan gradient
-                r_c = int(self._ring_grad_start[0] + (self._ring_grad_end[0] - self._ring_grad_start[0]) * frac)
-                g_c = int(self._ring_grad_start[1] + (self._ring_grad_end[1] - self._ring_grad_start[1]) * frac)
-                b_c = int(self._ring_grad_start[2] + (self._ring_grad_end[2] - self._ring_grad_start[2]) * frac)
-                color = f"#{r_c:02x}{g_c:02x}{b_c:02x}"
+            angle = math.radians(-90 + frac * 360)
+            # Each segment is a short tangent stroke so consecutive segments overlap
+            # smoothly into one continuous curve instead of leaving gaps.
             half_step_angle = (360 / self._ring_steps) * 0.65
             a1 = math.radians(-90 + frac * 360 - half_step_angle)
             a2 = math.radians(-90 + frac * 360 + half_step_angle)
@@ -446,16 +428,10 @@ class SignLanguageApp:
             x2 = cx + r * math.cos(a2)
             y2 = cy + r * math.sin(a2)
             self.ring_canvas.coords(seg, x1, y1, x2, y2)
-            self.ring_canvas.itemconfig(seg, state="normal", fill=color)
+            self.ring_canvas.itemconfig(seg, state="normal")
 
-        label_color = "#4ADE80" if high_conf else self.accent_secondary
         if hasattr(self, 'ring_value_label'):
-            self.ring_value_label.configure(
-                text=f"{int(percentage)}%",
-                text_color=label_color
-            )
-        if hasattr(self, 'conf_display'):
-            self.conf_display.configure(text_color=label_color)
+            self.ring_value_label.configure(text=f"{int(percentage)}%")
 
     def draw_waveform(self, intensity):
         self.wave_canvas.delete("all")
@@ -551,114 +527,18 @@ class SignLanguageApp:
         if text:
             self.speak_word(text)
 
-    # --------------------------------------------------
-    # T5 Grammar Error Correction
-    # --------------------------------------------------
-    _GEC_MODEL_NAME = "prithivida/grammar_error_correcter_v1"
-
-    def _load_gec_model(self):
-        """Load T5-small GEC model in background. Runs on CPU for Jetson Nano compatibility."""
-        self._gec_model    = None
-        self._gec_tokenizer = None
-        self._gec_ready    = False
-        if not _TRANSFORMERS_AVAILABLE:
-            print("[GEC] transformers not installed — Enhance Syntax will use basic cleanup.")
-            self.root.after(0, self._gec_mark_unavailable)
-            return
-        try:
-            print("[GEC] Loading T5 grammar model…")
-            tok   = T5Tokenizer.from_pretrained(self._GEC_MODEL_NAME)
-            model = T5ForConditionalGeneration.from_pretrained(self._GEC_MODEL_NAME)
-            model.eval()  # inference-only mode, saves memory
-            self._gec_tokenizer = tok
-            self._gec_model     = model
-            self._gec_ready     = True
-            print("[GEC] T5 grammar model ready.")
-            self.root.after(0, self._gec_mark_ready)
-        except Exception as e:
-            print(f"[GEC] Model load failed: {e}")
-            self.root.after(0, self._gec_mark_unavailable)
-
-    def _gec_mark_ready(self):
-        if hasattr(self, 'enhance_btn'):
-            self.enhance_btn.configure(
-                state="normal",
-                fg_color=self.accent_primary,
-                text="\U0001fa84 Enhance Syntax"
-            )
-
-    def _gec_mark_unavailable(self):
-        if hasattr(self, 'enhance_btn'):
-            self.enhance_btn.configure(
-                text="\U0001fa84 Enhance (basic)",
-                state="normal",
-                fg_color=self.card_alt
-            )
-
-    def _gec_correct(self, text):
-        """Run Hybrid AI: local grammar_engine rules first, then T5 GEC cleanup."""
-        # 1. Run local NLP rules (grammar_engine)
-        try:
-            from grammar_engine import process_sentence
-            raw_tokens = text.split()
-            rule_based_result = process_sentence(raw_tokens)
-            if not rule_based_result:
-                rule_based_result = text.strip().lower()
-        except Exception as e:
-            print(f"[GEC] Rule engine error: {e}")
-            rule_based_result = text.strip().lower()
-
-        # 2. Run T5 inference to polish the result
-        if self._gec_ready and self._gec_model is not None:
-            try:
-                import torch
-                prompt = f"gec: {rule_based_result}"
-                inputs = self._gec_tokenizer(
-                    prompt, return_tensors="pt",
-                    max_length=128, truncation=True
-                )
-                with torch.no_grad():
-                    outputs = self._gec_model.generate(
-                        inputs["input_ids"],
-                        max_length=128,
-                        num_beams=4,
-                        early_stopping=True
-                    )
-                result = self._gec_tokenizer.decode(outputs[0], skip_special_tokens=True)
-                # Ensure first letter is capitalised
-                return result[0].upper() + result[1:] if result else rule_based_result.capitalize()
-            except Exception as e:
-                print(f"[GEC] Inference error: {e}")
-                
-        # Fallback: Just return rule engine result
-        return rule_based_result[0].upper() + rule_based_result[1:] if rule_based_result else ""
-
     def manual_speak(self):
         if not self.word.strip():
             return
         if self._enhanced:
             return  # already enhanced — do nothing until new content added
-        # Disable button immediately; run inference in background so UI stays responsive
+        raw_tokens = self.word.split()
+        corrected_sentence = process_sentence(raw_tokens)
+        self.word = corrected_sentence + " "
+        self.set_target_word(self.word)
+        self._enhanced = True
         if hasattr(self, 'enhance_btn'):
-            self.enhance_btn.configure(state="disabled", fg_color=self.card_alt,
-                                       text="⏳ Enhancing…")
-        raw_text = self.word.strip()
-
-        def _run():
-            corrected = self._gec_correct(raw_text)
-            def _apply():
-                self.word = corrected + " "
-                self.set_target_word(self.word)
-                self._enhanced = True
-                if hasattr(self, 'enhance_btn'):
-                    self.enhance_btn.configure(
-                        state="disabled",
-                        fg_color=self.card_alt,
-                        text="\U0001fa84 Enhance Syntax"
-                    )
-            self.root.after(0, _apply)
-
-        threading.Thread(target=_run, daemon=True).start()
+            self.enhance_btn.configure(state="disabled", fg_color=self.card_alt)
 
     def _extract_word_features(self, mp_image):
         hand_result = self.hand_detector.detect(mp_image)
