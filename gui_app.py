@@ -951,18 +951,28 @@ class SignLanguageApp:
         self.root.destroy()
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    app_root = ctk.CTk()
-    # Force simple bitmap font on Jetson to prevent X11 RenderAddGlyphs crash
+
+    # ── Jetson ARM64: prevent customtkinter from uploading Roboto to X server ──
+    # The Roboto glyph packet is too large for the Jetson's X11 RENDER limit,
+    # causing a BadLength crash inside ctk.CTk(). We patch it out first.
     if _platform.machine() == 'aarch64':
         try:
-            app_root.tk.call('font', 'configure', 'TkDefaultFont',
-                             '-family', 'DejaVu Sans', '-size', '11')
-            app_root.tk.call('font', 'configure', 'TkTextFont',
-                             '-family', 'DejaVu Sans', '-size', '11')
-            app_root.tk.call('font', 'configure', 'TkFixedFont',
-                             '-family', 'DejaVu Sans Mono', '-size', '11')
+            import customtkinter.windows.widgets.font_manager as _ctk_fm
+            _ctk_fm.FontManager.load_font = classmethod(lambda cls, *a, **kw: False)
         except Exception:
             pass
+
+    app_root = ctk.CTk()
+
+    # Also reconfigure Tk system fonts to use DejaVu (always available on Ubuntu)
+    if _platform.machine() == 'aarch64':
+        for _fname in ('TkDefaultFont', 'TkTextFont', 'TkFixedFont', 'TkHeadingFont'):
+            try:
+                app_root.tk.call('font', 'configure', _fname,
+                                 '-family', 'DejaVu Sans', '-size', '11')
+            except Exception:
+                pass
+
     app = SignLanguageApp(app_root)
     app_root.protocol("WM_DELETE_WINDOW", app.on_close)
     app_root.mainloop()
