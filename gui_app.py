@@ -2,26 +2,28 @@ import os
 import platform as _platform
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['XLIB_SKIP_ARGB_VISUALS'] = '1'
-# On Jetson ARM64, force simple fonts to prevent X11 RenderAddGlyphs crash
-if _platform.machine() == 'aarch64':
-    os.environ.setdefault('FONTCONFIG_FILE', '/etc/fonts/fonts.conf')
-    os.environ['CTK_FONT_FAMILY'] = 'DejaVu Sans'
+
 import math
 import threading
 import queue
-try:
-    from transformers import T5ForConditionalGeneration, T5Tokenizer
-    _TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    _TRANSFORMERS_AVAILABLE = False
 import cv2
 import numpy as np
-import os
 import json
 import time
 import platform
 import multiprocessing
 import pyttsx3
+from collections import deque
+import tkinter as tk
+from tkinter import ttk
+from PIL import Image, ImageTk
+
+try:
+    from transformers import T5ForConditionalGeneration, T5Tokenizer
+    _TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    _TRANSFORMERS_AVAILABLE = False
+
 from tensorflow.keras.models import Sequential, Model
 from tensorflow.keras.layers import (
     Input, Dense, BatchNormalization, Dropout, Activation,
@@ -31,10 +33,7 @@ from tensorflow.keras.regularizers import l2
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import mediapipe as mp
-from collections import deque
-import customtkinter as ctk
-from PIL import Image, ImageTk
-# joblib kept for fallback only
+
 try:
     import joblib as _joblib
 except ImportError:
@@ -42,7 +41,7 @@ except ImportError:
 
 
 class _NumpyScaler:
-    """Minimal StandardScaler replacement using only numpy — no sklearn needed."""
+    """Minimal StandardScaler replacement using only numpy."""
     def __init__(self, mean, scale):
         self.mean_ = mean
         self.scale_ = scale
@@ -50,13 +49,10 @@ class _NumpyScaler:
     def transform(self, X):
         return (X - self.mean_) / self.scale_
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ==================================================
-# Pose landmark indices for word-mode feature extraction
-# ==================================================
-POSE_IDXS = [11, 12, 13, 14, 15, 16, 23, 24]  # shoulders, elbows, wrists, hips
-WORD_FRAMES = 30  # frames to buffer before word prediction
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+POSE_IDXS = [11, 12, 13, 14, 15, 16, 23, 24]
+WORD_FRAMES = 30
 
 
 # ==================================================
@@ -80,38 +76,29 @@ def tts_worker(conn):
             print(f"TTS Worker Error: {e}")
 
 
-
-
 # ==================================================
-# 2. UI APPLICATION CLASS
+# 2. UI APPLICATION CLASS (Standard Tkinter)
 # ==================================================
 class SignLanguageApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("SignToSound")
-        self.root.geometry("1100x720")
-        self.root.resizable(True, True)
-        try:
-            self.root.state("zoomed")
-        except:
-            pass
-        
-        ctk.set_appearance_mode("Dark")
-        # ── Palette: Deep Indigo ──
-        self.bg_color = "#0A0E1A"
-        self.card_color = "#131829"
-        self.card_alt = "#1D2440"
-        self.accent_primary = "#6366F1"     # indigo
-        self.accent_secondary = "#22D3EE"   # cyan
-        self.text_primary = "#F1F5F9"
-        self.text_secondary = "#7C85A3"
-        self.root.configure(fg_color=self.bg_color)
+        self.root.title("SignToSound (Jetson Edition)")
+        self.root.geometry("1024x600")
+        self.root.configure(bg="#1e1e1e")
+
+        self.bg_color = "#1e1e1e"
+        self.panel_bg = "#2d2d2d"
+        self.btn_bg = "#3d3d3d"
+        self.btn_fg = "#ffffff"
+        self.accent_color = "#6366f1"
+        self.text_color = "#ffffff"
+        self.sub_text_color = "#aaaaaa"
 
         self.displayed_word = ""
         self.target_word = ""
         self.typewriter_job = None
 
-        # --- MULTIPROCESSING TTS PIPE ---
+        # Multiprocessing TTS Pipe
         self.parent_conn, self.child_conn = multiprocessing.Pipe()
         self.proc = multiprocessing.Process(target=tts_worker, args=(self.child_conn,), daemon=True)
         self.proc.start()
@@ -137,9 +124,10 @@ class SignLanguageApp:
                 self.model.load_weights('sign_language_model.weights.h5')
             except:
                 pass
+
         self.actions = np.array(['A','B','C','D','E','F','G','H','I',
-                                  'K','L','M','N','O','P','Q','R','S',
-                                  'T','U','V','W','X','Y'])
+                                 'K','L','M','N','O','P','Q','R','S',
+                                 'T','U','V','W','X','Y'])
 
         # --- LOAD WORD MODEL ---
         with open("word_label_map.json") as f:
@@ -220,10 +208,7 @@ class SignLanguageApp:
         )
         self.pose_detector = vision.PoseLandmarker.create_from_options(pose_options)
 
-        # --- AUTO MODE VARIABLES ---
-        self.emitted_letters = []
-
-        # --- LETTER MODE VARIABLES ---
+        # Variables
         self.prediction_buffer = deque(maxlen=8)
         self.current_stable_letter = ""
         self.stable_frames = 0
@@ -233,27 +218,21 @@ class SignLanguageApp:
         self.word = ""
         self.last_seen_time = time.time()
         self.PAUSE_TIME = 1.5
-        self._enhanced = False   # tracks whether current text has already been enhanced
+        self._enhanced = False
 
-        # --- WORD MODE VARIABLES ---
         self.RECORD_DURATION   = 2.5
         self.word_raw_buffer   = []
         self.word_recording    = False
         self.word_record_start = 0.0
         self.word_cooldown_until = 0.0
-        self.last_word_prediction = ""
-        self.last_word_confidence = 0.0
 
-        # --- CAMERA ---
         self.cap = self._open_camera()
 
-        # Adaptive performance settings
         self._is_jetson = platform.machine() == 'aarch64'
-        self._loop_delay   = 66 if self._is_jetson else 15   # ms between frames
-        self._infer_every  = 1                                # threading handles skipping
+        self._loop_delay   = 66 if self._is_jetson else 15
+        self._infer_every  = 1
         self._frame_counter = 0
 
-        # Threaded inference pipeline (Jetson only)
         self._mp_image_queue   = queue.Queue(maxsize=1)
         self._infer_result_queue = queue.Queue(maxsize=1)
         if self._is_jetson:
@@ -261,7 +240,6 @@ class SignLanguageApp:
 
         self.build_ui()
         self.update_video()
-        # Load GEC model in the background so the UI opens instantly
         threading.Thread(target=self._load_gec_model, daemon=True).start()
 
     def _open_camera(self):
@@ -293,229 +271,80 @@ class SignLanguageApp:
             self.draw_waveform(0)
 
     def build_ui(self):
-        self.f_title = ("TkDefaultFont", 24, "bold")
-        self.f_header = ("TkDefaultFont", 16, "bold")
-        self.f_body = ("TkDefaultFont", 14)
-        self.f_large = ("TkDefaultFont", 48, "bold")
-        
-        # Size the video column to maintain 4:3 aspect ratio based on available window height.
-        # This keeps the camera view natural (no zoom) and lets the right panel expand freely.
-        self.root.update_idletasks()
-        win_h = self.root.winfo_height()
-        win_w = self.root.winfo_width()
-        # Vertical overhead: title bar (~30) + top pady (20) + gap (10) + bottom bar (180) + bottom paddings (30)
-        video_panel_h = max(300, win_h - 270)
-        # Width to maintain 4:3, plus frame's own padding
-        video_col_w = int(video_panel_h * 4 / 3) + 30
-        # Never take more than 65% of window width
-        video_col_w = min(video_col_w, int(win_w * 0.65))
-        self.root.grid_columnconfigure(0, weight=0, minsize=video_col_w)
-        self.root.grid_columnconfigure(1, weight=1)   # right panel expands
-        self.root.grid_rowconfigure(0, weight=1)
-        self.root.grid_rowconfigure(1, weight=0, minsize=180)
-        
-        # ── Video panel ──
-        self.video_frame = ctk.CTkFrame(self.root, corner_radius=20, fg_color="#000000")
-        self.video_frame.grid(row=0, column=0, padx=(20, 10), pady=(20, 10), sticky="nsew")
-        self.video_label = ctk.CTkLabel(self.video_frame, text="Webcam Loading...", font=self.f_body, fg_color="transparent")
-        self.video_label.place(relx=0.5, rely=0.5, anchor=ctk.CENTER)
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure("TProgressbar", thickness=10, background=self.accent_color, troughcolor=self.panel_bg)
 
-        # ── Info panel — all children packed, nothing ever clips ──
-        self.info_frame = ctk.CTkFrame(self.root, corner_radius=20, fg_color=self.card_color)
-        self.info_frame.grid(row=0, column=1, padx=(10, 20), pady=(20, 10), sticky="nsew")
+        # Layout Frames
+        self.top_frame = tk.Frame(self.root, bg=self.bg_color)
+        self.top_frame.pack(side="top", fill="both", expand=True, padx=10, pady=10)
 
+        self.bottom_frame = tk.Frame(self.root, bg=self.panel_bg, height=120, bd=2, relief="flat")
+        self.bottom_frame.pack(side="bottom", fill="x", padx=10, pady=10)
 
+        self.video_frame = tk.Frame(self.top_frame, bg="#000000", width=640, height=480)
+        self.video_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
 
-        # ── Confidence ring ──
-        self.ring_canvas = ctk.CTkCanvas(
-            self.info_frame, width=150, height=150,
-            bg=self.card_color, highlightthickness=0
-        )
-        self.ring_canvas.pack(pady=(14, 0))
+        self.video_label = tk.Label(self.video_frame, text="Webcam Loading...", bg="#000000", fg="#ffffff")
+        self.video_label.pack(fill="both", expand=True)
 
-        # Static background track
-        self.ring_canvas.create_oval(10, 10, 140, 140, outline=self.card_alt, width=12)
+        self.info_frame = tk.Frame(self.top_frame, bg=self.panel_bg, width=340)
+        self.info_frame.pack(side="right", fill="y", padx=0)
 
-        self._ring_cx, self._ring_cy, self._ring_r = 75, 75, 65
-        self._ring_steps = 200
-        self._ring_grad_start = (99, 102, 241)
-        self._ring_grad_end   = (34, 211, 238)
-        self.ring_segments = []
+        # Info Frame Widgets
+        tk.Label(self.info_frame, text="SignToSound", font=("Sans", 18, "bold"), bg=self.panel_bg, fg=self.text_color).pack(pady=(15, 5))
 
-        for i in range(self._ring_steps):
-            factor = i / (self._ring_steps - 1)
-            r = int(self._ring_grad_start[0] + (self._ring_grad_end[0] - self._ring_grad_start[0]) * factor)
-            g = int(self._ring_grad_start[1] + (self._ring_grad_end[1] - self._ring_grad_start[1]) * factor)
-            b = int(self._ring_grad_start[2] + (self._ring_grad_end[2] - self._ring_grad_start[2]) * factor)
-            color = f"#{r:02x}{g:02x}{b:02x}"
-            seg = self.ring_canvas.create_line(0, 0, 0, 0, fill=color, width=12,
-                                                capstyle="round", state="hidden")
-            self.ring_segments.append(seg)
+        self.conf_display = tk.Label(self.info_frame, text="Confidence: 0%", font=("Sans", 14), bg=self.panel_bg, fg="#22d3ee")
+        self.conf_display.pack(pady=5)
 
-        self.draw_confidence_ring(0)
+        self.auto_mode_status = tk.Label(self.info_frame, text="Waiting for sign...", font=("Sans", 12), bg=self.panel_bg, fg=self.sub_text_color)
+        self.auto_mode_status.pack(pady=5)
 
-        # Percentage label embedded inside the ring canvas (no clipping possible)
-        self.ring_value_label = ctk.CTkLabel(
-            self.ring_canvas, text="0%", font=("TkDefaultFont", 26, "bold"),
-            text_color=self.accent_secondary, fg_color=self.card_color
-        )
-        self.ring_canvas.create_window(75, 75, window=self.ring_value_label)
+        self.word_progress = ttk.Progressbar(self.info_frame, style="TProgressbar", orient="horizontal", mode="determinate")
+        self.word_progress.pack(fill="x", padx=20, pady=5)
 
-        # Hidden letter display — not shown, kept for internal logic
-        self.letter_display = ctk.CTkLabel(self.info_frame, text="", font=self.f_large)
+        # Buttons
+        btn_opts = {"bg": self.btn_bg, "fg": self.btn_fg, "activebackground": self.accent_color, "activeforeground": "#ffffff", "font": ("Sans", 11), "relief": "flat", "bd": 0, "pady": 6}
 
-        # Confidence label
-        self.conf_display = ctk.CTkLabel(
-            self.info_frame, text="Confidence: 0%",
-            font=self.f_body, text_color=self.accent_secondary
-        )
-        self.conf_display.pack(pady=(10, 0))
+        row1 = tk.Frame(self.info_frame, bg=self.panel_bg)
+        row1.pack(fill="x", padx=20, pady=(15, 5))
+        tk.Button(row1, text="Space", command=self.add_space, **btn_opts).pack(fill="x")
 
-        self.status_area = ctk.CTkFrame(self.info_frame, fg_color="transparent", height=30)
-        self.status_area.pack(pady=(4, 0), padx=20, fill="x")
+        row2 = tk.Frame(self.info_frame, bg=self.panel_bg)
+        row2.pack(fill="x", padx=20, pady=5)
+        tk.Button(row2, text="Backspace", command=self.delete_last, **btn_opts).pack(side="left", expand=True, fill="x", padx=(0, 2))
+        tk.Button(row2, text="Del Word", command=self.delete_word, **btn_opts).pack(side="left", expand=True, fill="x", padx=2)
+        tk.Button(row2, text="Clear", command=self.clear_word, bg="#e5484d", fg="#ffffff", font=("Sans", 11), relief="flat", pady=6).pack(side="left", expand=True, fill="x", padx=(2, 0))
 
-        self.auto_mode_status = ctk.CTkLabel(
-            self.status_area, text="Waiting for sign...", font=self.f_body, text_color=self.text_secondary
-        )
-        self.auto_mode_status.pack()
+        self.enhance_btn = tk.Button(self.info_frame, text="Loading AI...", command=self.manual_speak, state="disabled", **btn_opts)
+        self.enhance_btn.pack(fill="x", padx=20, pady=5)
 
-        self.word_progress = ctk.CTkProgressBar(
-            self.info_frame, height=8, progress_color=self.accent_primary
-        )
-        self.word_progress.pack(pady=(4, 0), padx=20, fill="x")
-        self.word_progress.set(0)
+        tk.Button(self.info_frame, text="Speak Out Loud", command=self.speak_out_loud, bg="#16a34a", fg="#ffffff", font=("Sans", 11, "bold"), relief="flat", pady=8).pack(fill="x", padx=20, pady=(5, 10))
 
-        # ── Button row 1a: Space ──
-        btn_space = ctk.CTkFrame(self.info_frame, fg_color="transparent")
-        btn_space.pack(pady=(18, 0), padx=20, fill="x")
-        ctk.CTkButton(btn_space, text="\u2423 Space", font=self.f_body,
-                      command=self.add_space, fg_color=self.card_alt, width=0
-                      ).pack(side="left", expand=True, fill="x")
-
-        # ── Button row 1b: Backspace / Delete Word / Clear ──
-        btn_row1 = ctk.CTkFrame(self.info_frame, fg_color="transparent")
-        btn_row1.pack(pady=(6, 0), padx=20, fill="x")
-        ctk.CTkButton(btn_row1, text="\u232b Backspace", font=self.f_body,
-                      command=self.delete_last, fg_color=self.card_alt, width=0
-                      ).pack(side="left", expand=True, fill="x", padx=(0, 4))
-        ctk.CTkButton(btn_row1, text="\u2715 Del Word", font=self.f_body,
-                      command=self.delete_word, fg_color=self.card_alt, width=0
-                      ).pack(side="left", expand=True, fill="x", padx=4)
-        ctk.CTkButton(btn_row1, text="\U0001f5d1\ufe0f Clear", font=self.f_body,
-                      command=self.clear_word, fg_color="#E5484D", width=0
-                      ).pack(side="left", expand=True, fill="x", padx=(4, 0))
-
-        # ── Button row 2: Enhance (starts disabled until T5 loads) ──
-        btn_row2 = ctk.CTkFrame(self.info_frame, fg_color="transparent")
-        btn_row2.pack(pady=(8, 0), padx=20, fill="x")
-        self.enhance_btn = ctk.CTkButton(
-            btn_row2, text="⏳ Loading AI…", font=self.f_body,
-            command=self.manual_speak, fg_color=self.card_alt,
-            state="disabled", width=0
-        )
-        self.enhance_btn.pack(side="left", expand=True, fill="x")
-
-        # ── Button row 3: Speak Out Loud ──
-        btn_row3 = ctk.CTkFrame(self.info_frame, fg_color="transparent")
-        btn_row3.pack(pady=(8, 0), padx=20, fill="x")
-        ctk.CTkButton(
-            btn_row3, text="\U0001f50a Speak Out Loud", font=self.f_body,
-            command=self.speak_out_loud,
-            fg_color="#16A34A", hover_color="#15803D", width=0
-        ).pack(side="left", expand=True, fill="x")
-
-        # ── Sentence / bottom bar ──
-        self.bottom_frame = ctk.CTkFrame(self.root, corner_radius=20, fg_color=self.card_color)
-        self.bottom_frame.grid(row=1, column=0, columnspan=2, padx=20, pady=(10, 20), sticky="nsew")
-        
-        self.wave_canvas = ctk.CTkCanvas(
-            self.bottom_frame, width=100, height=40,
-            bg=self.card_color, highlightthickness=0
-        )
-        self.wave_canvas.place(relx=1.0, x=-120, y=20)
+        # Waveform Canvas
+        self.wave_canvas = tk.Canvas(self.bottom_frame, width=120, height=40, bg=self.panel_bg, highlightthickness=0)
+        self.wave_canvas.pack(side="right", padx=20, pady=20)
         self.draw_waveform(0)
 
-        ctk.CTkLabel(self.bottom_frame, text="Live Output:", font=self.f_header).place(x=20, y=20)
-        self.word_display = ctk.CTkLabel(
-            self.bottom_frame, text="",
-            font=("TkDefaultFont", 32, "bold"), text_color="#E3B341", justify="left"
-        )
-        self.word_display.place(x=20, y=60)
+        tk.Label(self.bottom_frame, text="Live Output:", font=("Sans", 12, "bold"), bg=self.panel_bg, fg=self.sub_text_color).pack(anchor="nw", padx=15, pady=(10, 0))
         
-        self.word_info_label = ctk.CTkLabel(
-            self.bottom_frame,
-            text="\U0001f916 AUTO MODE \u2014 Sign letters or words directly, the AI will auto-detect",
-            font=self.f_body, text_color=self.text_secondary
-        )
-        self.word_info_label.place(x=20, rely=1.0, y=-40)
-        
-        def update_wraplength(event):
-            self.word_display.configure(wraplength=event.width - 40)
-        self.bottom_frame.bind("<Configure>", update_wraplength)
-
-    def draw_confidence_ring(self, percentage):
-        """Draws a smooth gradient ring sweeping clockwise from the top (12 o'clock).
-        Turns green when percentage >= 80, otherwise indigo-to-cyan gradient."""
-        if not hasattr(self, 'ring_segments'):
-            return
-        percentage = max(0, min(100, percentage))
-        visible_steps = round((percentage / 100) * self._ring_steps)
-        high_conf = percentage >= 80
-
-        cx, cy, r = self._ring_cx, self._ring_cy, self._ring_r
-        for i, seg in enumerate(self.ring_segments):
-            if i >= visible_steps:
-                self.ring_canvas.itemconfig(seg, state="hidden")
-                continue
-            frac = i / (self._ring_steps - 1)
-            if high_conf:
-                # Solid green gradient: dark green → bright green
-                g_val = int(160 + 74 * frac)   # 160 → 234
-                color = f"#22{g_val:02x}5E".replace("5E", f"{int(60 + 38*frac):02x}")
-                # Simpler: blend #16A34A → #4ADE80
-                r_c = int(0x16 + (0x4A - 0x16) * frac)
-                g_c = int(0xA3 + (0xDE - 0xA3) * frac)
-                b_c = int(0x4A + (0x80 - 0x4A) * frac)
-                color = f"#{r_c:02x}{g_c:02x}{b_c:02x}"
-            else:
-                # Default indigo → cyan gradient
-                r_c = int(self._ring_grad_start[0] + (self._ring_grad_end[0] - self._ring_grad_start[0]) * frac)
-                g_c = int(self._ring_grad_start[1] + (self._ring_grad_end[1] - self._ring_grad_start[1]) * frac)
-                b_c = int(self._ring_grad_start[2] + (self._ring_grad_end[2] - self._ring_grad_start[2]) * frac)
-                color = f"#{r_c:02x}{g_c:02x}{b_c:02x}"
-            half_step_angle = (360 / self._ring_steps) * 0.65
-            a1 = math.radians(-90 + frac * 360 - half_step_angle)
-            a2 = math.radians(-90 + frac * 360 + half_step_angle)
-            x1 = cx + r * math.cos(a1)
-            y1 = cy + r * math.sin(a1)
-            x2 = cx + r * math.cos(a2)
-            y2 = cy + r * math.sin(a2)
-            self.ring_canvas.coords(seg, x1, y1, x2, y2)
-            self.ring_canvas.itemconfig(seg, state="normal", fill=color)
-
-        label_color = "#4ADE80" if high_conf else self.accent_secondary
-        if hasattr(self, 'ring_value_label'):
-            self.ring_value_label.configure(
-                text=f"{int(percentage)}%",
-                text_color=label_color
-            )
-        if hasattr(self, 'conf_display'):
-            self.conf_display.configure(text_color=label_color)
+        self.word_display = tk.Label(self.bottom_frame, text="", font=("Sans", 26, "bold"), bg=self.panel_bg, fg="#e3b341", anchor="w", justify="left")
+        self.word_display.pack(fill="x", padx=15, pady=(5, 10))
 
     def draw_waveform(self, intensity):
         self.wave_canvas.delete("all")
         import random
-        for i in range(5):
+        for i in range(6):
             h = 4 if intensity == 0 else random.randint(10, 35)
             x = 10 + i * 18
             y = 35 - h
-            self.wave_canvas.create_rectangle(x, y, x+10, 35, fill=self.accent_primary, outline="")
+            self.wave_canvas.create_rectangle(x, y, x+12, 35, fill=self.accent_color, outline="")
 
     def set_target_word(self, new_word):
         self.target_word = new_word
         if len(self.displayed_word) > len(self.target_word):
             self.displayed_word = self.target_word
-            self.word_display.configure(text=self.displayed_word)
+            self.word_display.config(text=self.displayed_word)
         if hasattr(self, 'typewriter_job') and self.typewriter_job:
             self.root.after_cancel(self.typewriter_job)
             self.typewriter_job = None
@@ -524,10 +353,8 @@ class SignLanguageApp:
     def update_typewriter(self):
         if len(self.displayed_word) < len(self.target_word):
             self.displayed_word = self.target_word[:len(self.displayed_word)+1]
-            self.word_display.configure(text=self.displayed_word)
+            self.word_display.config(text=self.displayed_word)
             self.typewriter_job = self.root.after(40, self.update_typewriter)
-
-    # Removed mode change logic since we are using unified Auto Mode
 
     def add_space(self):
         if not self.word.endswith(" "):
@@ -543,13 +370,10 @@ class SignLanguageApp:
             self.letter_buffer = []
 
     def delete_word(self):
-        """Delete the last word (or trailing space if cursor is after a space)."""
         text = self.word.rstrip(" ")
         if " " in text:
-            # Trim back to the end of the previous word, keeping one trailing space
             self.word = text.rsplit(" ", 1)[0] + " "
         else:
-            # Only one word left — clear it entirely
             self.word = ""
         self.set_target_word(self.word)
         self.letter_buffer = []
@@ -560,37 +384,32 @@ class SignLanguageApp:
         self.letter_buffer = []
 
     def _mark_content_changed(self):
-        """Re-enable Enhance Syntax whenever new content is added."""
         if self._enhanced:
             self._enhanced = False
             if hasattr(self, 'enhance_btn'):
-                self.enhance_btn.configure(state="normal", fg_color=self.accent_primary)
+                self.enhance_btn.config(state="normal", bg=self.btn_bg)
 
     def speak_out_loud(self):
-        """Speak whatever is currently in the output box."""
         text = self.word.strip()
         if text:
             self.speak_word(text)
 
-    # --------------------------------------------------
-    # T5 Grammar Error Correction
-    # --------------------------------------------------
+    # GEC Model
     _GEC_MODEL_NAME = "prithivida/grammar_error_correcter_v1"
 
     def _load_gec_model(self):
-        """Load T5-small GEC model in background. Runs on CPU for Jetson Nano compatibility."""
         self._gec_model    = None
         self._gec_tokenizer = None
         self._gec_ready    = False
         if not _TRANSFORMERS_AVAILABLE:
-            print("[GEC] transformers not installed — Enhance Syntax will use basic cleanup.")
+            print("[GEC] transformers not installed.")
             self.root.after(0, self._gec_mark_unavailable)
             return
         try:
-            print("[GEC] Loading T5 grammar model…")
+            print("[GEC] Loading T5 grammar model...")
             tok   = T5Tokenizer.from_pretrained(self._GEC_MODEL_NAME)
             model = T5ForConditionalGeneration.from_pretrained(self._GEC_MODEL_NAME)
-            model.eval()  # inference-only mode, saves memory
+            model.eval()
             self._gec_tokenizer = tok
             self._gec_model     = model
             self._gec_ready     = True
@@ -602,23 +421,13 @@ class SignLanguageApp:
 
     def _gec_mark_ready(self):
         if hasattr(self, 'enhance_btn'):
-            self.enhance_btn.configure(
-                state="normal",
-                fg_color=self.accent_primary,
-                text="\U0001fa84 Enhance Syntax"
-            )
+            self.enhance_btn.config(state="normal", text="Enhance Syntax", bg=self.accent_color)
 
     def _gec_mark_unavailable(self):
         if hasattr(self, 'enhance_btn'):
-            self.enhance_btn.configure(
-                text="\U0001fa84 Enhance (basic)",
-                state="normal",
-                fg_color=self.card_alt
-            )
+            self.enhance_btn.config(state="normal", text="Enhance (Basic)", bg=self.btn_bg)
 
     def _gec_correct(self, text):
-        """Run Hybrid AI: local grammar_engine rules first, then T5 GEC cleanup."""
-        # 1. Run local NLP rules (grammar_engine)
         try:
             from grammar_engine import process_sentence
             raw_tokens = text.split()
@@ -626,43 +435,25 @@ class SignLanguageApp:
             if not rule_based_result:
                 rule_based_result = text.strip().lower()
         except Exception as e:
-            print(f"[GEC] Rule engine error: {e}")
             rule_based_result = text.strip().lower()
 
-        # 2. Run T5 inference to polish the result
         if self._gec_ready and self._gec_model is not None:
             try:
                 import torch
                 prompt = f"gec: {rule_based_result}"
-                inputs = self._gec_tokenizer(
-                    prompt, return_tensors="pt",
-                    max_length=128, truncation=True
-                )
+                inputs = self._gec_tokenizer(prompt, return_tensors="pt", max_length=128, truncation=True)
                 with torch.no_grad():
-                    outputs = self._gec_model.generate(
-                        inputs["input_ids"],
-                        max_length=128,
-                        num_beams=4,
-                        early_stopping=True
-                    )
+                    outputs = self._gec_model.generate(inputs["input_ids"], max_length=128, num_beams=4, early_stopping=True)
                 result = self._gec_tokenizer.decode(outputs[0], skip_special_tokens=True)
-                # Ensure first letter is capitalised
                 return result[0].upper() + result[1:] if result else rule_based_result.capitalize()
-            except Exception as e:
-                print(f"[GEC] Inference error: {e}")
-                
-        # Fallback: Just return rule engine result
+            except Exception:
+                pass
         return rule_based_result[0].upper() + rule_based_result[1:] if rule_based_result else ""
 
     def manual_speak(self):
-        if not self.word.strip():
+        if not self.word.strip() or self._enhanced:
             return
-        if self._enhanced:
-            return  # already enhanced — do nothing until new content added
-        # Disable button immediately; run inference in background so UI stays responsive
-        if hasattr(self, 'enhance_btn'):
-            self.enhance_btn.configure(state="disabled", fg_color=self.card_alt,
-                                       text="⏳ Enhancing…")
+        self.enhance_btn.config(state="disabled", text="Enhancing...")
         raw_text = self.word.strip()
 
         def _run():
@@ -671,12 +462,7 @@ class SignLanguageApp:
                 self.word = corrected + " "
                 self.set_target_word(self.word)
                 self._enhanced = True
-                if hasattr(self, 'enhance_btn'):
-                    self.enhance_btn.configure(
-                        state="disabled",
-                        fg_color=self.card_alt,
-                        text="\U0001fa84 Enhance Syntax"
-                    )
+                self.enhance_btn.config(state="disabled", text="Enhance Syntax")
             self.root.after(0, _apply)
 
         threading.Thread(target=_run, daemon=True).start()
@@ -709,27 +495,11 @@ class SignLanguageApp:
     def apply_video_effects(self, frame, hand_result):
         return frame
 
-    def round_corners_pil(self, im, rad):
-        from PIL import ImageDraw, Image
-        circle = Image.new('L', (rad * 2, rad * 2), 0)
-        draw = ImageDraw.Draw(circle)
-        draw.ellipse((0, 0, rad * 2 - 1, rad * 2 - 1), fill=255)
-        alpha = Image.new('L', im.size, 255)
-        w, h = im.size
-        alpha.paste(circle.crop((0, 0, rad, rad)), (0, 0))
-        alpha.paste(circle.crop((0, rad, rad, rad * 2)), (0, h - rad))
-        alpha.paste(circle.crop((rad, 0, rad * 2, rad)), (w - rad, 0))
-        alpha.paste(circle.crop((rad, rad, rad * 2, rad * 2)), (w - rad, h - rad))
-        im.putalpha(alpha)
-        return im
-
     def _inference_thread(self):
-        """Background thread: runs MediaPipe + model inference on Jetson."""
         while True:
             try:
                 mp_image = self._mp_image_queue.get(timeout=1.0)
                 result = self._process_frame(mp_image)
-                # Always keep only the latest result
                 try:
                     self._infer_result_queue.get_nowait()
                 except queue.Empty:
@@ -741,7 +511,7 @@ class SignLanguageApp:
     def update_video(self):
         ret, frame = self.cap.read()
         if not ret or frame is None:
-            self.video_label.configure(text="[X] Camera not found!", image="")
+            self.video_label.config(text="[X] Camera not found!", image="")
             self.root.after(1000, self.update_video)
             return
 
@@ -750,12 +520,10 @@ class SignLanguageApp:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
         if self._is_jetson:
-            # Push frame to inference thread (non-blocking, drop if busy)
             try:
                 self._mp_image_queue.put_nowait(mp_image)
             except queue.Full:
                 pass
-            # Get latest inference result (non-blocking)
             try:
                 hand_result = self._infer_result_queue.get_nowait()
                 self._last_hand_result = hand_result
@@ -769,21 +537,17 @@ class SignLanguageApp:
         frame = self.apply_video_effects(frame, hand_result)
         rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        from PIL import Image
         img = Image.fromarray(rgb)
-
         v_width  = self.video_frame.winfo_width()
         v_height = self.video_frame.winfo_height()
         if v_width < 10 or v_height < 10:
             v_width, v_height = 640, 480
 
-        # Jetson: fast BILINEAR resize, skip expensive rounded corners
         resize_method = Image.BILINEAR if self._is_jetson else Image.LANCZOS
         img = img.resize((v_width, v_height), resize_method)
-        if not self._is_jetson:
-            img = self.round_corners_pil(img, 20)
-        imgtk = ctk.CTkImage(light_image=img, dark_image=img, size=(v_width, v_height))
-        self.video_label.configure(text="", image=imgtk)
+        imgtk = ImageTk.PhotoImage(image=img)
+        self.video_label.imgtk = imgtk
+        self.video_label.config(text="", image=imgtk)
 
         self.root.after(self._loop_delay, self.update_video)
 
@@ -796,17 +560,13 @@ class SignLanguageApp:
             self.current_stable_letter = ""
             self.word_recording = False
             self.word_raw_buffer.clear()
-            if hasattr(self, 'word_progress'):
-                self.word_progress.set(0)
-            self.conf_display.configure(text="Confidence: 0%")
-            self.draw_confidence_ring(0)
-            if hasattr(self, 'auto_mode_status'):
-                self.auto_mode_status.configure(text="Waiting for sign...")
+            self.word_progress["value"] = 0
+            self.conf_display.config(text="Confidence: 0%")
+            self.auto_mode_status.config(text="Waiting for sign...")
             if len(self.letter_buffer) > 0 and (now - self.last_seen_time) > self.PAUSE_TIME:
                 self.letter_buffer = []
             return hand_result
 
-        # --- LETTER EVALUATION ---
         letter_conf = 0.0
         letter_label = ""
         
@@ -842,7 +602,6 @@ class SignLanguageApp:
                 self.stable_frames = 1
 
             if self.stable_frames == self.REQUIRED_FRAMES:
-                # EMIT LETTER
                 if len(self.letter_buffer) == 0 or letter_label != self.letter_buffer[-1]:
                     self.letter_buffer.append(letter_label)
                     self.word += letter_label
@@ -850,49 +609,36 @@ class SignLanguageApp:
                     self._mark_content_changed()
                 self.last_seen_time = now
                 
-                # RESET WORD RECORDING (User is holding a steady letter!)
                 self.word_recording = False
                 self.word_raw_buffer.clear()
-                if hasattr(self, 'word_progress'):
-                    self.word_progress.set(0)
-                if hasattr(self, 'auto_mode_status'):
-                    self.auto_mode_status.configure(text=f"Letter: {letter_label}")
-                
-                self.conf_display.configure(text=f"Confidence: {int(letter_conf * 100)}%")
-                self.draw_confidence_ring(int(letter_conf * 100))
+                self.word_progress["value"] = 0
+                self.auto_mode_status.config(text=f"Letter: {letter_label}")
+                self.conf_display.config(text=f"Confidence: {int(letter_conf * 100)}%")
                 return hand_result
         else:
             self.stable_frames = 0
             
-        # --- WORD EVALUATION (Explicit Window) ---
         if now < self.word_cooldown_until:
-            if hasattr(self, 'auto_mode_status'):
-                self.auto_mode_status.configure(text="Cooldown...")
-            self.conf_display.configure(text=f"Confidence: {int(letter_conf * 100)}%")
-            self.draw_confidence_ring(int(letter_conf * 100))
+            self.auto_mode_status.config(text="Cooldown...")
+            self.conf_display.config(text=f"Confidence: {int(letter_conf * 100)}%")
             return hand_result
 
         if not self.word_recording:
             self.word_recording = True
             self.word_record_start = now
             self.word_raw_buffer = []
-            if hasattr(self, 'word_progress'):
-                self.word_progress.set(0)
+            self.word_progress["value"] = 0
             
         elapsed = now - self.word_record_start
-        progress = min(1.0, elapsed / self.RECORD_DURATION)
-        if hasattr(self, 'word_progress'):
-            self.word_progress.set(progress)
+        progress = min(100.0, (elapsed / self.RECORD_DURATION) * 100)
+        self.word_progress["value"] = progress
         
         self.word_raw_buffer.append(features)
 
         if elapsed < self.RECORD_DURATION:
-            if hasattr(self, 'auto_mode_status'):
-                self.auto_mode_status.configure(text=f"🔴 Recording Word… {elapsed:.1f} / {self.RECORD_DURATION:.1f}s")
-            self.conf_display.configure(text=f"Confidence: {int(letter_conf * 100)}%")
-            self.draw_confidence_ring(int(letter_conf * 100))
+            self.auto_mode_status.config(text=f"[REC] Word... {elapsed:.1f}s")
+            self.conf_display.config(text=f"Confidence: {int(letter_conf * 100)}%")
         else:
-            # End of window. Evaluate word.
             self.word_recording = False
             raw = self.word_raw_buffer
             self.word_raw_buffer = []
@@ -916,11 +662,8 @@ class SignLanguageApp:
                 max_entropy = np.log(len(probs))
                 
                 if entropy <= 0.75 * max_entropy and word_confidence > 0.80:
-                    # Emit Word!
-                    self.conf_display.configure(text=f"Word Conf: {int(word_confidence * 100)}%")
-                    self.draw_confidence_ring(int(word_confidence * 100))
-                    if hasattr(self, 'auto_mode_status'):
-                        self.auto_mode_status.configure(text=f"✅ {word_label}")
+                    self.conf_display.config(text=f"Word Conf: {int(word_confidence * 100)}%")
+                    self.auto_mode_status.config(text=f"[OK] {word_label}")
                     
                     self.word += word_label + " "
                     self.set_target_word(self.word)
@@ -929,16 +672,11 @@ class SignLanguageApp:
                     self.word_cooldown_until = now + 1.5
                     return hand_result
 
-            # If we didn't emit a Word
-            if hasattr(self, 'auto_mode_status'):
-                self.auto_mode_status.configure(text="Not recognised.")
-            
-            # Start recording the next window immediately
+            self.auto_mode_status.config(text="Not recognised.")
             self.word_recording = True
             self.word_record_start = now
             self.word_raw_buffer = [features]
-            if hasattr(self, 'word_progress'):
-                self.word_progress.set(0)
+            self.word_progress["value"] = 0
 
         return hand_result
 
@@ -949,30 +687,11 @@ class SignLanguageApp:
             pass
         self.cap.release()
         self.root.destroy()
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-
-    # ── Jetson ARM64: prevent customtkinter from uploading Roboto to X server ──
-    # The Roboto glyph packet is too large for the Jetson's X11 RENDER limit,
-    # causing a BadLength crash inside ctk.CTk(). We patch it out first.
-    if _platform.machine() == 'aarch64':
-        try:
-            import customtkinter.windows.widgets.font_manager as _ctk_fm
-            _ctk_fm.FontManager.load_font = classmethod(lambda cls, *a, **kw: False)
-        except Exception:
-            pass
-
-    app_root = ctk.CTk()
-
-    # Also reconfigure Tk system fonts to use DejaVu (always available on Ubuntu)
-    if _platform.machine() == 'aarch64':
-        for _fname in ('TkDefaultFont', 'TkTextFont', 'TkFixedFont', 'TkHeadingFont'):
-            try:
-                app_root.tk.call('font', 'configure', _fname,
-                                 '-family', 'DejaVu Sans', '-size', '11')
-            except Exception:
-                pass
-
+    app_root = tk.Tk()
     app = SignLanguageApp(app_root)
     app_root.protocol("WM_DELETE_WINDOW", app.on_close)
     app_root.mainloop()
