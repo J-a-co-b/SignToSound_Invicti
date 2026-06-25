@@ -1,8 +1,14 @@
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Silence TF/CUDA verbose logs
-os.environ['XLIB_SKIP_ARGB_VISUALS'] = '1' # Fix X11 BadLength RenderAddGlyphs error
+import platform as _platform
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['XLIB_SKIP_ARGB_VISUALS'] = '1'
+# On Jetson ARM64, force simple fonts to prevent X11 RenderAddGlyphs crash
+if _platform.machine() == 'aarch64':
+    os.environ.setdefault('FONTCONFIG_FILE', '/etc/fonts/fonts.conf')
+    os.environ['CTK_FONT_FAMILY'] = 'DejaVu Sans'
 import math
 import threading
+import queue
 try:
     from transformers import T5ForConditionalGeneration, T5Tokenizer
     _TRANSFORMERS_AVAILABLE = True
@@ -241,11 +247,18 @@ class SignLanguageApp:
         # --- CAMERA ---
         self.cap = self._open_camera()
 
-        # Adaptive performance: slower loop + frame-skipped inference on Jetson ARM64
-        _is_jetson = platform.machine() == 'aarch64'
-        self._loop_delay   = 50 if _is_jetson else 15   # ms between frames
-        self._infer_every  = 2  if _is_jetson else 1    # run AI every N frames
+        # Adaptive performance settings
+        self._is_jetson = platform.machine() == 'aarch64'
+        self._loop_delay   = 66 if self._is_jetson else 15   # ms between frames
+        self._infer_every  = 1                                # threading handles skipping
         self._frame_counter = 0
+
+        # Threaded inference pipeline (Jetson only)
+        self._mp_image_queue   = queue.Queue(maxsize=1)
+        self._infer_result_queue = queue.Queue(maxsize=1)
+        if self._is_jetson:
+            threading.Thread(target=self._inference_thread, daemon=True).start()
+
         self.build_ui()
         self.update_video()
         # Load GEC model in the background so the UI opens instantly
@@ -710,10 +723,25 @@ class SignLanguageApp:
         im.putalpha(alpha)
         return im
 
+    def _inference_thread(self):
+        """Background thread: runs MediaPipe + model inference on Jetson."""
+        while True:
+            try:
+                mp_image = self._mp_image_queue.get(timeout=1.0)
+                result = self._process_frame(mp_image)
+                # Always keep only the latest result
+                try:
+                    self._infer_result_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                self._infer_result_queue.put(result)
+            except queue.Empty:
+                continue
+
     def update_video(self):
         ret, frame = self.cap.read()
         if not ret or frame is None:
-            self.video_label.configure(text="❌ Camera not found!", image="")
+            self.video_label.configure(text="[X] Camera not found!", image="")
             self.root.after(1000, self.update_video)
             return
 
@@ -721,29 +749,39 @@ class SignLanguageApp:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
-        self._frame_counter += 1
-        run_inference = (self._frame_counter % self._infer_every == 0)
-
-        if run_inference:
-            hand_result = self._process_frame(mp_image)
+        if self._is_jetson:
+            # Push frame to inference thread (non-blocking, drop if busy)
+            try:
+                self._mp_image_queue.put_nowait(mp_image)
+            except queue.Full:
+                pass
+            # Get latest inference result (non-blocking)
+            try:
+                hand_result = self._infer_result_queue.get_nowait()
+                self._last_hand_result = hand_result
+            except queue.Empty:
+                hand_result = getattr(self, '_last_hand_result', None)
         else:
-            hand_result = getattr(self, '_last_hand_result', None)
-        self._last_hand_result = hand_result
+            self._frame_counter += 1
+            hand_result = self._process_frame(mp_image)
+            self._last_hand_result = hand_result
 
         frame = self.apply_video_effects(frame, hand_result)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         from PIL import Image
         img = Image.fromarray(rgb)
-        
-        # The video frame is sized to maintain 4:3, so simple fill — no bezels, no distortion, fast.
-        v_width = self.video_frame.winfo_width()
+
+        v_width  = self.video_frame.winfo_width()
         v_height = self.video_frame.winfo_height()
         if v_width < 10 or v_height < 10:
             v_width, v_height = 640, 480
 
-        img = img.resize((v_width, v_height))
-        img = self.round_corners_pil(img, 20)
+        # Jetson: fast BILINEAR resize, skip expensive rounded corners
+        resize_method = Image.BILINEAR if self._is_jetson else Image.LANCZOS
+        img = img.resize((v_width, v_height), resize_method)
+        if not self._is_jetson:
+            img = self.round_corners_pil(img, 20)
         imgtk = ctk.CTkImage(light_image=img, dark_image=img, size=(v_width, v_height))
         self.video_label.configure(text="", image=imgtk)
 
@@ -914,6 +952,17 @@ class SignLanguageApp:
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     app_root = ctk.CTk()
+    # Force simple bitmap font on Jetson to prevent X11 RenderAddGlyphs crash
+    if _platform.machine() == 'aarch64':
+        try:
+            app_root.tk.call('font', 'configure', 'TkDefaultFont',
+                             '-family', 'DejaVu Sans', '-size', '11')
+            app_root.tk.call('font', 'configure', 'TkTextFont',
+                             '-family', 'DejaVu Sans', '-size', '11')
+            app_root.tk.call('font', 'configure', 'TkFixedFont',
+                             '-family', 'DejaVu Sans Mono', '-size', '11')
+        except Exception:
+            pass
     app = SignLanguageApp(app_root)
     app_root.protocol("WM_DELETE_WINDOW", app.on_close)
     app_root.mainloop()
