@@ -509,6 +509,23 @@ class SignLanguageApp:
         else:
             self.draw_waveform(0)
 
+    def _update_video_column_width(self):
+        win_h = self.root.winfo_height()
+        win_w = self.root.winfo_width()
+        if win_h < 50 or win_w < 50:
+            return
+        # Vertical overhead: title bar (~30) + top pady (20) + gap (10) + bottom bar (180) + bottom paddings (30)
+        video_panel_h = max(300, win_h - 270)
+        # Width to maintain 4:3, plus frame's own padding
+        video_col_w = int(video_panel_h * 4 / 3) + 30
+        # Never take more than 65% of window width
+        video_col_w = min(video_col_w, int(win_w * 0.65))
+        self.root.grid_columnconfigure(0, weight=0, minsize=video_col_w)
+
+    def _on_root_configure(self, event):
+        if event.widget is self.root:
+            self._update_video_column_width()
+
     def build_ui(self):
         self.f_title = ("Segoe UI", 24, "bold")
         self.f_header = ("Segoe UI", 16, "bold")
@@ -517,19 +534,17 @@ class SignLanguageApp:
         
         # Size the video column to maintain 4:3 aspect ratio based on available window height.
         # This keeps the camera view natural (no zoom) and lets the right panel expand freely.
+        # Recomputed on every root <Configure>, not just once here: some window managers
+        # (e.g. the Jetson's) apply root.state("zoomed") asynchronously, so winfo_height()
+        # at this point can still report the pre-zoom geometry. Pinning column 0's minsize
+        # to that stale value while row 0 (weight=1) later stretches to the real, taller
+        # window leaves the video panel tall and narrow with huge letterbox bars.
         self.root.update_idletasks()
-        win_h = self.root.winfo_height()
-        win_w = self.root.winfo_width()
-        # Vertical overhead: title bar (~30) + top pady (20) + gap (10) + bottom bar (180) + bottom paddings (30)
-        video_panel_h = max(300, win_h - 270)
-        # Width to maintain 4:3, plus frame's own padding
-        video_col_w = int(video_panel_h * 4 / 3) + 30
-        # Never take more than 65% of window width
-        video_col_w = min(video_col_w, int(win_w * 0.65))
-        self.root.grid_columnconfigure(0, weight=0, minsize=video_col_w)
+        self._update_video_column_width()
         self.root.grid_columnconfigure(1, weight=1)   # right panel expands
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_rowconfigure(1, weight=0, minsize=180)
+        self.root.bind("<Configure>", self._on_root_configure)
         
         # ── Video panel ──
         self.video_frame = ctk.CTkFrame(self.root, corner_radius=20, fg_color="#000000")
@@ -968,17 +983,24 @@ class SignLanguageApp:
         return frame
 
     def round_corners_pil(self, im, rad):
+        # The alpha mask only depends on (size, rad), which is static frame to
+        # frame (panel size only changes on window resize) — cache it instead
+        # of rebuilding it with 4 paste() calls on every single video frame.
         from PIL import ImageDraw, Image
-        circle = Image.new('L', (rad * 2, rad * 2), 0)
-        draw = ImageDraw.Draw(circle)
-        draw.ellipse((0, 0, rad * 2 - 1, rad * 2 - 1), fill=255)
-        alpha = Image.new('L', im.size, 255)
-        w, h = im.size
-        alpha.paste(circle.crop((0, 0, rad, rad)), (0, 0))
-        alpha.paste(circle.crop((0, rad, rad, rad * 2)), (0, h - rad))
-        alpha.paste(circle.crop((rad, 0, rad * 2, rad)), (w - rad, 0))
-        alpha.paste(circle.crop((rad, rad, rad * 2, rad * 2)), (w - rad, h - rad))
-        im.putalpha(alpha)
+        cache_key = (im.size, rad)
+        if getattr(self, '_corner_mask_key', None) != cache_key:
+            circle = Image.new('L', (rad * 2, rad * 2), 0)
+            draw = ImageDraw.Draw(circle)
+            draw.ellipse((0, 0, rad * 2 - 1, rad * 2 - 1), fill=255)
+            w, h = im.size
+            alpha = Image.new('L', im.size, 255)
+            alpha.paste(circle.crop((0, 0, rad, rad)), (0, 0))
+            alpha.paste(circle.crop((0, rad, rad, rad * 2)), (0, h - rad))
+            alpha.paste(circle.crop((rad, 0, rad * 2, rad)), (w - rad, 0))
+            alpha.paste(circle.crop((rad, rad, rad * 2, rad * 2)), (w - rad, h - rad))
+            self._corner_mask_key = cache_key
+            self._corner_mask = alpha
+        im.putalpha(self._corner_mask)
         return im
 
     def update_video(self):
@@ -1005,14 +1027,24 @@ class SignLanguageApp:
 
         from PIL import Image
         img = Image.fromarray(rgb)
-        
-        # The video frame is sized to maintain 4:3, so simple fill — no bezels, no distortion, fast.
+
         v_width = self.video_frame.winfo_width()
         v_height = self.video_frame.winfo_height()
         if v_width < 10 or v_height < 10:
             v_width, v_height = 640, 480
 
-        img = img.resize((v_width, v_height))
+        # Scale to fit inside the panel preserving aspect ratio (no stretch), then
+        # letterbox onto a black canvas of the panel's exact size. The panel isn't
+        # guaranteed to be exactly 4:3 (window-manager geometry/zoom timing differs
+        # across platforms), so a hard resize to (v_width, v_height) can distort the
+        # image — this keeps the feed undistorted regardless of panel shape.
+        fw, fh = img.size
+        scale = min(v_width / fw, v_height / fh)
+        new_w, new_h = max(1, int(fw * scale)), max(1, int(fh * scale))
+        img = img.resize((new_w, new_h))
+        canvas = Image.new("RGB", (v_width, v_height), (0, 0, 0))
+        canvas.paste(img, ((v_width - new_w) // 2, (v_height - new_h) // 2))
+        img = canvas
         img = self.round_corners_pil(img, 20)
         imgtk = ctk.CTkImage(light_image=img, dark_image=img, size=(v_width, v_height))
         self.video_label.configure(text="", image=imgtk)
@@ -1039,7 +1071,11 @@ class SignLanguageApp:
                     landmarks /= max_val
                 landmarks = landmarks.reshape(1, 63)
 
-            prediction = self.model.predict(landmarks, verbose=0)
+            # Direct call instead of .predict(): predict() rebuilds a tf.data
+            # pipeline on every invocation, which dominates runtime for
+            # single-frame inference in a tight loop — calling the model
+            # directly skips that overhead entirely.
+            prediction = self.model(landmarks, training=False).numpy()
             self.prediction_buffer.append(prediction)
 
             avg_pred = np.mean(self.prediction_buffer, axis=0)[0]
@@ -1125,7 +1161,7 @@ class SignLanguageApp:
             else:
                 seq = seq.reshape(1, WORD_FRAMES, 150)
 
-            probs     = self.word_model.predict(seq, verbose=0)[0]
+            probs     = self.word_model(seq, training=False).numpy()[0]
             class_id  = int(np.argmax(probs))
             confidence = float(probs[class_id])
             word_label = self.word_labels[str(class_id)]
