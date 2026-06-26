@@ -43,8 +43,3 @@ PROJECT_STATUS.txt
 # OS files
 .DS_Store
 Thumbs.db
-
-# Data & logs
-*.npz
-*.log
-*.old.pkl

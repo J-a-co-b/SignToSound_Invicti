@@ -8,21 +8,9 @@ from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
-import tensorflow as tf
 import matplotlib.pyplot as plt
 import seaborn as sns
 import joblib
-
-
-# ── Focal Loss (boosts hard-to-classify signs like R vs U, M vs N) ──────────
-def focal_loss(gamma=2.0):
-    """Focal loss wrapper — same interface as categorical_crossentropy."""
-    def _loss(y_true, y_pred):
-        y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
-        ce     = -y_true * tf.math.log(y_pred)          # standard cross-entropy
-        weight = tf.pow(1.0 - y_pred, gamma)             # down-weight easy samples
-        return tf.reduce_sum(weight * ce, axis=-1)
-    return _loss
 
 # ==================================================
 # 1. LOAD DATA FROM 'My_Keypoint_Data'
@@ -72,8 +60,6 @@ def augment_sample(points_flat, n_augments=5):
       • Random Z-axis scale      – simulates depth variation
       • Random small rotation    – simulates hand tilt/twist
       • Random per-finger swap   – left↔right mirror
-      • Perspective jitter       – simulates off-angle camera view
-      • Per-finger dropout       – randomly zeroes one finger for occlusion robustness
     """
     pts = points_flat.reshape(21, 3)
     augmented = []
@@ -103,18 +89,6 @@ def augment_sample(points_flat, n_augments=5):
         # 5. Random horizontal mirror (50 % chance)
         if np.random.rand() < 0.5:
             aug[:, 0] = -aug[:, 0]
-
-        # 6. Perspective jitter — simulate off-angle view by shearing XY with Z
-        shear = np.random.uniform(-0.05, 0.05)
-        aug[:, 0] += shear * aug[:, 2]
-        aug[:, 1] += shear * aug[:, 2]
-
-        # 7. Per-finger dropout — zero out one random finger (4 landmarks)
-        #    Fingers: index=1-4, middle=5-8, ring=9-12, pinky=13-16, thumb=17-20
-        finger_starts = [1, 5, 9, 13, 17]
-        if np.random.rand() < 0.3:   # 30% chance
-            fs = np.random.choice(finger_starts)
-            aug[fs:fs+4] = 0.0
 
         augmented.append(aug.flatten())
 
@@ -183,9 +157,7 @@ model = Sequential([
     Dense(len(actions), activation="softmax")
 ])
 
-model.compile(optimizer='adam',
-              loss=focal_loss(gamma=2.0),
-              metrics=['accuracy'])
+model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
 model.summary()
 
 

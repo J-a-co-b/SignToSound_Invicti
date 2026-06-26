@@ -19,8 +19,13 @@ Output: word_model.keras               Keras model (desktop use)
 """
 
 import os
+import sys
 import json
 import numpy as np
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 import joblib
 import matplotlib
 matplotlib.use("Agg")          # non-interactive backend — no display needed
@@ -46,18 +51,6 @@ from tensorflow.keras.callbacks import (
 from tensorflow.keras.utils    import to_categorical
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l2
-
-
-# ── Focal Loss (boosts hard-to-classify similar words) ────────────────────
-def focal_loss(gamma=2.0):
-    """Focal loss — down-weights easy samples, forces model to learn hard ones."""
-    def _loss(y_true, y_pred):
-        import tensorflow as tf
-        y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
-        ce     = -y_true * tf.math.log(y_pred)
-        weight = tf.pow(1.0 - y_pred, gamma)
-        return tf.reduce_sum(weight * ce, axis=-1)
-    return _loss
 
 # ======================================================
 # 1. CONSTANTS
@@ -89,7 +82,11 @@ for word in words:
     for f in sorted(os.listdir(word_path)):
         if not f.endswith(".npy"):
             continue
-        seq = np.load(os.path.join(word_path, f))
+        try:
+            seq = np.load(os.path.join(word_path, f))
+        except Exception as e:
+            print(f"  ⚠️  Unreadable file {f} ({e}) — skipping")
+            continue
         if seq.shape != (N_FRAMES, FRAME_DIM):
             print(f"  ⚠️  Bad shape {seq.shape}: {f} — skipping")
             continue
@@ -148,18 +145,6 @@ def augment_sequence(seq, n=AUG_PER_SAMPLE):
         n_drop = np.random.randint(0, 3)
         drop_idx = np.random.choice(T, n_drop, replace=False)
         s[drop_idx] = 0.0
-
-        # 6. Perspective jitter — shear XY relative to Z depth
-        shear = np.random.uniform(-0.04, 0.04)
-        for start in range(0, D, 3):
-            if start + 2 < D:
-                s[:, start]     += shear * s[:, start + 2]
-                s[:, start + 1] += shear * s[:, start + 2]
-
-        # 7. Landmark dropout — randomly zero 1-3 landmark dimensions
-        if np.random.rand() < 0.3:
-            drop_dims = np.random.choice(D, np.random.randint(1, 4), replace=False)
-            s[:, drop_dims] = 0.0
 
         augmented.append(s)
     return augmented
@@ -273,7 +258,7 @@ def build_model(n_classes, n_frames=N_FRAMES, frame_dim=FRAME_DIM):
 model = build_model(n_classes)
 model.compile(
     optimizer=Adam(learning_rate=1e-3),
-    loss=focal_loss(gamma=2.0),
+    loss="categorical_crossentropy",
     metrics=["accuracy"]
 )
 model.summary()

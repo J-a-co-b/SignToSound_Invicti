@@ -1,4 +1,4 @@
-# pi_runner.py — Headless Raspberry Pi 3B+ runner (USB boot, no SD card)
+# pi_runner.py — Headless runner (Raspberry Pi 3B+ / NVIDIA Jetson Nano)
 import os, sys, time, json
 import cv2
 import numpy as np
@@ -23,13 +23,52 @@ except ImportError:
     print("WARNING: ST7789 not found. Running without display.")
     HAS_DISPLAY = False
 
+# ── Jetson Nano: detect hardware ────────────────────────────────────────────────
+def _is_jetson():
+    try:
+        with open("/proc/device-tree/model") as f:
+            return "jetson" in f.read().lower()
+    except Exception:
+        return False
+
+IS_JETSON = _is_jetson()
+
 from grammar_engine import process_sentence
 
 # ── Constants ──────────────────────────────────────
-POSE_IDXS    = [11, 12, 13, 14, 15, 16, 23, 24]
-WORD_FRAMES  = 30
+POSE_IDXS      = [11, 12, 13, 14, 15, 16, 23, 24]
+WORD_FRAMES    = 30
 DISP_W, DISP_H = 320, 240
-SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
+# Jetson captures at higher resolution; Pi stays at 320x240 to keep CPU load low
+CAP_W  = 640 if IS_JETSON else 320
+CAP_H  = 480 if IS_JETSON else 240
+SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
+
+# ── Jetson CSI camera pipeline (IMX219 / Raspberry Camera v2) ──────────────────
+def _gstreamer_pipeline(framerate=30):
+    return (
+        f"nvarguscamerasrc ! "
+        f"video/x-raw(memory:NVMM), width=(int){CAP_W}, height=(int){CAP_H}, "
+        f"framerate=(fraction){framerate}/1 ! "
+        f"nvvidconv flip-method=2 ! "
+        f"video/x-raw, width=(int){CAP_W}, height=(int){CAP_H}, format=(string)BGRx ! "
+        f"videoconvert ! video/x-raw, format=(string)BGR ! appsink"
+    )
+
+def _open_camera():
+    """On Jetson: try CSI (GStreamer) first, fall back to USB. On Pi: USB only."""
+    if IS_JETSON:
+        cap = cv2.VideoCapture(_gstreamer_pipeline(), cv2.CAP_GSTREAMER)
+        if cap.isOpened():
+            print("Camera: CSI via GStreamer")
+            return cap
+        cap.release()
+        print("CSI not found, falling back to USB camera.")
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAP_W)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAP_H)
+    print("Camera: USB")
+    return cap
 
 # ── TTS Worker ─────────────────────────────────────
 def tts_worker(conn):
@@ -55,9 +94,14 @@ class PiSignToSound:
         print("🔧 Initializing SignToSound Device...")
 
         # SPI TFT Display
+        # Jetson Nano J41: DC=22 (GPIO25), RST=11 (GPIO17), BL=32 (GPIO12)
+        # Raspberry Pi:    DC=24 (GPIO8),  RST=25 (GPIO25), BL=18 (GPIO24)
         if HAS_DISPLAY:
+            dc  = 22 if IS_JETSON else 24
+            rst = 11 if IS_JETSON else 25
+            bl  = 32 if IS_JETSON else 18
             self.disp = ST7789.ST7789(
-                port=0, cs=0, dc=24, rst=25, backlight=18,
+                port=0, cs=0, dc=dc, rst=rst, backlight=bl,
                 spi_speed_hz=80_000_000
             )
             self.disp.begin()
@@ -84,15 +128,19 @@ class PiSignToSound:
         ])
 
         # TFLite — Letter model
+        # Jetson Nano has 4 Cortex-A57 cores; Pi 3B+ has 4 Cortex-A53 cores
+        _threads = 4
         self.lt_interp = tflite.Interpreter(
-            model_path=os.path.join(SCRIPT_DIR, "sign_language_model.tflite"))
+            model_path=os.path.join(SCRIPT_DIR, "sign_language_model.tflite"),
+            num_threads=_threads)
         self.lt_interp.allocate_tensors()
         self.lt_in  = self.lt_interp.get_input_details()[0]['index']
         self.lt_out = self.lt_interp.get_output_details()[0]['index']
 
         # TFLite — Word model
         self.wd_interp = tflite.Interpreter(
-            model_path=os.path.join(SCRIPT_DIR, "word_model.tflite"))
+            model_path=os.path.join(SCRIPT_DIR, "word_model.tflite"),
+            num_threads=_threads)
         self.wd_interp.allocate_tensors()
         self.wd_in  = self.wd_interp.get_input_details()[0]['index']
         self.wd_out = self.wd_interp.get_output_details()[0]['index']
@@ -111,10 +159,8 @@ class PiSignToSound:
                 min_pose_presence_confidence=0.4,
                 min_tracking_confidence=0.4))
 
-        # Camera (320x240 for Pi performance)
-        self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+        # Camera — auto-selects CSI (Jetson) or USB
+        self.cap = _open_camera()
 
         # State
         self.mode                = "WORD"

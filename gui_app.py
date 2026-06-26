@@ -1,3 +1,8 @@
+import os
+import platform as _platform
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['XLIB_SKIP_ARGB_VISUALS'] = '1'
+
 import math
 import threading
 try:
@@ -13,17 +18,40 @@ import time
 import platform
 import multiprocessing
 import pyttsx3
-try:
-    import tflite_runtime.interpreter as tflite
-except ImportError:
-    import tensorflow.lite as tflite
+from tensorflow.keras.models import Sequential, Model, load_model
+from tensorflow.keras.layers import (
+    Input, Dense, BatchNormalization, Dropout, Activation,
+    SeparableConv1D, GlobalAveragePooling1D
+)
+from tensorflow.keras.regularizers import l2
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import mediapipe as mp
 from collections import deque
+
 import customtkinter as ctk
+
+# Patch customtkinter's FontManager on Jetson ARM64, AFTER importing it.
+# CTk bundles a Roboto TTF and registers its full glyph set with the X server;
+# Jetson's X11 RENDER extension rejects that registration with
+# "BadLength (RenderAddGlyphs)", crashing the process the moment any CTk
+# widget is drawn. Making load_font a no-op stops CTk from ever registering
+# Roboto, so widgets fall back to Tk's default system font instead.
+# Scanning sys.modules (rather than guessing a submodule path) finds
+# FontManager regardless of which internal module customtkinter put it in.
+if _platform.machine() == 'aarch64':
+    import sys
+    _patched_any = False
+    for _mod_name, _mod in list(sys.modules.items()):
+        if _mod_name and _mod_name.startswith('customtkinter') and hasattr(_mod, 'FontManager'):
+            _mod.FontManager.load_font = classmethod(lambda cls, *a, **kw: False)
+            print(f"[Jetson] Patched FontManager in {_mod_name}")
+            _patched_any = True
+    if not _patched_any:
+        print("[Jetson] WARNING: could not find customtkinter.FontManager to patch")
+
 from PIL import Image, ImageTk
-import joblib
+import h5py
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -32,6 +60,188 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # ==================================================
 POSE_IDXS = [11, 12, 13, 14, 15, 16, 23, 24]  # shoulders, elbows, wrists, hips
 WORD_FRAMES = 30  # frames to buffer before word prediction
+
+
+class _NumpyScaler:
+    """Minimal StandardScaler replacement using only numpy.
+
+    Avoids importing sklearn at runtime: on Jetson/aarch64, unpickling a
+    sklearn StandardScaler via joblib.load() pulls in sklearn's native
+    extensions, which crash with "cannot allocate memory in static TLS
+    block" once TensorFlow has already claimed the limited static TLS
+    space. Loading mean_/scale_ straight out of a plain .npz sidesteps
+    sklearn entirely.
+    """
+    def __init__(self, mean, scale):
+        self.mean_ = mean
+        self.scale_ = scale
+
+    def transform(self, X):
+        return (X - self.mean_) / self.scale_
+
+
+def _load_scaler(npz_path, pkl_path):
+    """Load a fitted StandardScaler-like object, preferring the sklearn-free
+    .npz format. Falls back to joblib/.pkl only if no .npz is present, and
+    never lets a sklearn import failure crash the app."""
+    if os.path.exists(npz_path):
+        data = np.load(npz_path)
+        return _NumpyScaler(data["mean"], data["scale"])
+    if os.path.exists(pkl_path):
+        try:
+            import joblib
+            return joblib.load(pkl_path)
+        except Exception as exc:
+            print(f"[WARN] Failed to load scaler '{pkl_path}' via joblib/sklearn: {exc}")
+    return None
+
+
+# ==================================================
+# Robust weight loader — handles TF2 Keras and Keras 3 formats
+# ==================================================
+def _load_weights_smart(model, filepath):
+    """Try every known .h5 weight format so the app works regardless of
+    which Keras version saved the file.
+
+    Strategy 1 – TF2 Keras load_weights  (old .h5 weights-only format)
+    Strategy 2 – h5py Keras-3 format     (/layers/{name}/vars/{0,1,...})
+    Strategy 3 – h5py flat format        (/{layer_name}/{weight_name})
+    """
+    # Store errors as strings — Python 3 deletes 'except ... as e' variables
+    # after the except block exits, causing UnboundLocalError if referenced later.
+    e1 = e2 = "not reached"
+
+    # ── 1. TF2 Keras load_weights ──────────────────────────────────────
+    try:
+        model.load_weights(filepath)
+        print(f"[INFO] load_weights() OK  ← {filepath}")
+        return
+    except Exception as _exc:
+        e1 = str(_exc)
+        print(f"[WARN] load_weights failed: {e1}")
+
+    # ── 2 & 3. h5py direct read ────────────────────────────────────────
+    try:
+        with h5py.File(filepath, 'r') as hf:
+
+            # ── 2. Keras 3 format: /layers/{name}/vars/{0,1,...} ───────
+            if 'layers' in hf:
+                loaded, skipped = 0, 0
+                layers_grp = hf['layers']
+                for layer in model.layers:
+                    if not layer.weights:
+                        continue
+                    lname = layer.name
+                    if lname in layers_grp and 'vars' in layers_grp[lname]:
+                        vg = layers_grp[lname]['vars']
+                        w = [np.array(vg[str(i)]) for i in range(len(vg))]
+                        if w:
+                            try:
+                                layer.set_weights(w)
+                                loaded += 1
+                            except ValueError as _se:
+                                print(f"[WARN] Shape mismatch layer '{lname}': {_se}")
+                                skipped += 1
+                if loaded and skipped == 0:
+                    print(f"[INFO] h5py Keras-3 format OK — {loaded} layers  ← {filepath}")
+                    return
+                if loaded and skipped:
+                    raise ValueError(
+                        f"Keras-3 format: {loaded} layers loaded but {skipped} had shape mismatches. "
+                        f"The word model architecture in gui_app.py doesn't match the trained model. "
+                        f"Re-run with _infer_word_arch() to auto-detect."
+                    )
+                print("[WARN] /layers group found but no layer names matched; trying flat format…")
+
+            # ── 3. Flat format: /{layer_name}/{weight_name} ──
+            loaded = 0
+            for layer in model.layers:
+                if not layer.weights:
+                    continue
+                if layer.name in hf:
+                    wg = hf[layer.name]
+                    w = [np.array(wg[k]) for k in sorted(wg.keys())]
+                    if w:
+                        try:
+                            layer.set_weights(w)
+                            loaded += 1
+                        except ValueError as _se:
+                            print(f"[WARN] Shape mismatch layer '{layer.name}': {_se}")
+            if loaded:
+                print(f"[INFO] h5py flat format OK — {loaded} layers  ← {filepath}")
+                return
+
+            # Dump top-level structure to help diagnose unknown formats
+            top_keys = list(hf.keys())
+            all_paths: list = []
+            hf.visititems(lambda n, _: all_paths.append(n))
+            raise ValueError(
+                f"Unrecognised HDF5 structure.\n"
+                f"  Top-level keys : {top_keys}\n"
+                f"  All paths (≤30): {all_paths[:30]}"
+            )
+    except Exception as _exc:
+        e2 = str(_exc)
+        raise RuntimeError(
+            f"All weight-loading strategies failed for '{filepath}':\n"
+            f"  1. TF2 load_weights : {e1}\n"
+            f"  2+3. h5py           : {e2}"
+        )
+
+
+def _h5_all_arrays(group):
+    """Recursively collect every dataset in an h5py group, sorted by path.
+    Handles both flat (vars/0) and Keras-3 nested (layers/sub/vars/0) structures."""
+    result = []
+    group.visititems(
+        lambda name, obj: result.append((name, np.array(obj)))
+        if isinstance(obj, h5py.Dataset) else None
+    )
+    return [v for _, v in sorted(result)]   # alphabetical path sort
+
+
+def _infer_word_arch(filepath):
+    """Read weight shapes directly from the sep_conv / dense layers in the file —
+    NOT from the BatchNorm layers, which have naming-counter issues.
+    Returns (f1, f2, f3, d1).  Falls back to (64, 64, 32, 64) on any error."""
+    defaults = (64, 64, 32, 64)
+    try:
+        with h5py.File(filepath, 'r') as hf:
+            if 'layers' not in hf:
+                return defaults
+            lg = hf['layers']
+
+            def _conv_out_filters(conv_name):
+                """Read output-filter count from a SeparableConv1D saved in Keras-3 format.
+                Alphabetical sort → [depthwise_kernel, pointwise_kernel, (bias)].
+                pointwise kernel shape: (1, in_ch*dm, out_filters) or (in_ch*dm, out_filters)."""
+                if conv_name not in lg:
+                    return None
+                arrays = _h5_all_arrays(lg[conv_name])
+                # Need at least 2 arrays (depthwise + pointwise kernels)
+                if len(arrays) < 2:
+                    return None
+                pw_kernel = arrays[1]       # index 1 = pointwise kernel
+                return int(pw_kernel.shape[-1])
+
+            def _dense_out(dense_name):
+                """kernel shape[-1] → number of Dense output units."""
+                if dense_name not in lg:
+                    return None
+                arrays = _h5_all_arrays(lg[dense_name])
+                if not arrays:
+                    return None
+                return int(arrays[0].shape[-1])   # kernel is first array
+
+            f1 = _conv_out_filters('separable_conv1d') or defaults[0]
+            f2 = _conv_out_filters('separable_conv1d_1') or defaults[1]
+            f3 = _conv_out_filters('separable_conv1d_2') or defaults[2]
+            d1 = _dense_out('dense')             or defaults[3]
+            print(f"[INFO] Inferred word model arch: conv({f1})-conv({f2})-conv({f3})-dense({d1})")
+            return f1, f2, f3, d1
+    except Exception as _exc:
+        print(f"[WARN] _infer_word_arch failed ({_exc}), using defaults {defaults}")
+        return defaults
 
 
 # ==================================================
@@ -91,31 +301,135 @@ class SignLanguageApp:
         self.proc = multiprocessing.Process(target=tts_worker, args=(self.child_conn,), daemon=True)
         self.proc.start()
 
-        # --- LOAD LETTER MODEL (TFLITE) ---
-        self.letter_interpreter = tflite.Interpreter(model_path='sign_language_model.tflite')
-        self.letter_interpreter.allocate_tensors()
-        self.letter_input_details = self.letter_interpreter.get_input_details()
-        self.letter_output_details = self.letter_interpreter.get_output_details()
+        # --- LOAD LETTER MODEL ---
+        # 1st attempt: load_model handles files saved with model.save()
+        # 2nd attempt: build Sequential + _load_weights_smart (TF2 or Keras-3 weights format)
+        try:
+            self.model = load_model('sign_language_model.weights.h5', compile=False)
+            self.model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+            print("[INFO] Letter model loaded via load_model()")
+        except Exception:
+            self.model = Sequential([
+                Dense(128, activation='relu', input_shape=(63,)),
+                BatchNormalization(momentum=0.99, epsilon=0.001),
+                Dropout(0.3),
+                Dense(64, activation='relu'),
+                BatchNormalization(momentum=0.99, epsilon=0.001),
+                Dropout(0.2),
+                Dense(32, activation='relu'),
+                Dense(24, activation='softmax'),
+            ])
+            self.model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+            _load_weights_smart(self.model, 'sign_language_model.weights.h5')
         self.actions = np.array(['A','B','C','D','E','F','G','H','I',
                                   'K','L','M','N','O','P','Q','R','S',
                                   'T','U','V','W','X','Y'])
 
-        # --- LOAD WORD MODEL (TFLITE) ---
+        # --- LOAD WORD MODEL ---
         with open("word_label_map.json") as f:
             self.word_labels = json.load(f)
         self.word_list = [self.word_labels[str(i)] for i in range(len(self.word_labels))]
         n_classes = len(self.word_labels)
 
-        self.word_interpreter = tflite.Interpreter(model_path='word_model.tflite')
-        self.word_interpreter.allocate_tensors()
-        self.word_input_details = self.word_interpreter.get_input_details()
-        self.word_output_details = self.word_interpreter.get_output_details()
+        def _build_word_model(f1=64, f2=64, f3=32, d1=64):
+            """Build word model with filter/unit counts read from the saved file."""
+            _inp = Input(shape=(WORD_FRAMES, 150), name="landmarks")
+            _x = SeparableConv1D(f1, kernel_size=3, padding="same",
+                                depthwise_regularizer=l2(1e-4),
+                                pointwise_regularizer=l2(1e-4),
+                                name="sep_conv1")(_inp)
+            _x = BatchNormalization()(_x)
+            _x = Activation("relu")(_x)
+            _x = Dropout(0.25)(_x)
+            _x = SeparableConv1D(f2, kernel_size=5, padding="same",
+                                depthwise_regularizer=l2(1e-4),
+                                pointwise_regularizer=l2(1e-4),
+                                name="sep_conv2")(_x)
+            _x = BatchNormalization()(_x)
+            _x = Activation("relu")(_x)
+            _x = Dropout(0.25)(_x)
+            _x = SeparableConv1D(f3, kernel_size=7, padding="same",
+                                depthwise_regularizer=l2(1e-4),
+                                pointwise_regularizer=l2(1e-4),
+                                name="sep_conv3")(_x)
+            _x = BatchNormalization()(_x)
+            _x = Activation("relu")(_x)
+            _x = Dropout(0.20)(_x)
+            _x = GlobalAveragePooling1D()(_x)
+            _x = Dense(d1, activation="relu", kernel_regularizer=l2(1e-4))(_x)
+            _x = Dropout(0.25)(_x)
+            _out = Dense(n_classes, activation="softmax", name="predictions")(_x)
+            return Model(_inp, _out, name="SignToSound_Word")
+
+        # ── Word model loading ─────────────────────────────────────────────────
+        # Try load_model first (full-model save format).
+        # Otherwise: positional loading from the Keras-3 .h5 file.
+        #
+        # WHY POSITIONAL?
+        # The letter model is built first, consuming the global Keras layer-name
+        # counters (e.g. batch_normalization=0, batch_normalization_1=1).
+        # The word model's BN layers then get names like batch_normalization_2/3/4
+        # while the file (saved in a fresh Keras-3 session) has them as
+        # batch_normalization/batch_normalization_1/batch_normalization_2.
+        # Name matching therefore assigns the wrong weights → shape mismatch.
+        # Positional matching zips file layers to model layers by topology order,
+        # regardless of their names.
+        #
+        # File layer topology order (must match _build_word_model architecture).
+        # Names are Keras's auto-generated names from train_words.py (which did not
+        # pass explicit `name=` to the SeparableConv1D layers), NOT the
+        # "sep_conv1/2/3" names _build_word_model uses locally — those only need to
+        # match positionally, not by name.
+        _WORD_FILE_TOPOLOGY = [
+            'separable_conv1d',   'batch_normalization',
+            'separable_conv1d_1', 'batch_normalization_1',
+            'separable_conv1d_2', 'batch_normalization_2',
+            'dense',              'dense_1',
+        ]
+
+        def _load_word_positional(wmodel, wpath):
+            """Load word model weights from Keras-3 h5 by topology position."""
+            with h5py.File(wpath, 'r') as hf:
+                if 'layers' not in hf:
+                    raise ValueError("No /layers group in word_model.weights.h5")
+                lg = hf['layers']
+                wt_layers = [l for l in wmodel.layers if l.weights]
+                if len(wt_layers) != len(_WORD_FILE_TOPOLOGY):
+                    raise ValueError(
+                        f"Expected {len(_WORD_FILE_TOPOLOGY)} weight layers, "
+                        f"got {len(wt_layers)}: {[l.name for l in wt_layers]}"
+                    )
+                for ml, fname in zip(wt_layers, _WORD_FILE_TOPOLOGY):
+                    if fname not in lg:
+                        raise ValueError(f"Layer '{fname}' missing from file")
+                    ml.set_weights(_h5_all_arrays(lg[fname]))
+            print(f"[INFO] Word model loaded positionally ({len(_WORD_FILE_TOPOLOGY)} layers)")
+
+        try:
+            self.word_model = load_model("word_model.weights.h5", compile=False)
+            self.word_model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
+            print("[INFO] Word model loaded via load_model()")
+        except Exception:
+            f1, f2, f3, d1 = _infer_word_arch("word_model.weights.h5")
+            self.word_model = _build_word_model(f1, f2, f3, d1)
+            self.word_model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
+            # First try standard load_weights (handles old TF2 format)
+            try:
+                self.word_model.load_weights("word_model.weights.h5")
+                print("[INFO] Word model loaded via load_weights()")
+            except Exception:
+                # Fall back to positional loading (handles Keras-3 format)
+                _load_word_positional(self.word_model, "word_model.weights.h5")
 
         # --- LOAD SCALERS ---
-        scaler_path = os.path.join(os.getcwd(), "scaler.pkl")
-        self.scaler = joblib.load(scaler_path) if os.path.exists(scaler_path) else None
-        word_scaler_path = os.path.join(os.getcwd(), "word_scaler.pkl")
-        self.word_scaler = joblib.load(word_scaler_path) if os.path.exists(word_scaler_path) else None
+        self.scaler = _load_scaler(
+            os.path.join(os.getcwd(), "scaler.npz"),
+            os.path.join(os.getcwd(), "scaler.pkl"),
+        )
+        self.word_scaler = _load_scaler(
+            os.path.join(os.getcwd(), "word_scaler.npz"),
+            os.path.join(os.getcwd(), "word_scaler.pkl"),
+        )
 
         # --- LOAD MEDIAPIPE DETECTORS ---
         SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -308,20 +622,20 @@ class SignLanguageApp:
         # ── Button row 1a: Space ──
         btn_space = ctk.CTkFrame(self.info_frame, fg_color="transparent")
         btn_space.pack(pady=(18, 0), padx=20, fill="x")
-        ctk.CTkButton(btn_space, text="\u2423 Space", font=self.f_body,
+        ctk.CTkButton(btn_space, text="Space", font=self.f_body,
                       command=self.add_space, fg_color=self.card_alt, width=0
                       ).pack(side="left", expand=True, fill="x")
 
         # ── Button row 1b: Backspace / Delete Word / Clear ──
         btn_row1 = ctk.CTkFrame(self.info_frame, fg_color="transparent")
         btn_row1.pack(pady=(6, 0), padx=20, fill="x")
-        ctk.CTkButton(btn_row1, text="\u232b Backspace", font=self.f_body,
+        ctk.CTkButton(btn_row1, text="Backspace", font=self.f_body,
                       command=self.delete_last, fg_color=self.card_alt, width=0
                       ).pack(side="left", expand=True, fill="x", padx=(0, 4))
-        ctk.CTkButton(btn_row1, text="\u2715 Del Word", font=self.f_body,
+        ctk.CTkButton(btn_row1, text="Del Word", font=self.f_body,
                       command=self.delete_word, fg_color=self.card_alt, width=0
                       ).pack(side="left", expand=True, fill="x", padx=4)
-        ctk.CTkButton(btn_row1, text="\U0001f5d1\ufe0f Clear", font=self.f_body,
+        ctk.CTkButton(btn_row1, text="Clear", font=self.f_body,
                       command=self.clear_word, fg_color="#E5484D", width=0
                       ).pack(side="left", expand=True, fill="x", padx=(4, 0))
 
@@ -329,7 +643,7 @@ class SignLanguageApp:
         btn_row2 = ctk.CTkFrame(self.info_frame, fg_color="transparent")
         btn_row2.pack(pady=(8, 0), padx=20, fill="x")
         self.enhance_btn = ctk.CTkButton(
-            btn_row2, text="⏳ Loading AI…", font=self.f_body,
+            btn_row2, text="Loading AI...", font=self.f_body,
             command=self.manual_speak, fg_color=self.card_alt,
             state="disabled", width=0
         )
@@ -339,7 +653,7 @@ class SignLanguageApp:
         btn_row3 = ctk.CTkFrame(self.info_frame, fg_color="transparent")
         btn_row3.pack(pady=(8, 0), padx=20, fill="x")
         ctk.CTkButton(
-            btn_row3, text="\U0001f50a Speak Out Loud", font=self.f_body,
+            btn_row3, text="Speak Out Loud", font=self.f_body,
             command=self.speak_out_loud,
             fg_color="#16A34A", hover_color="#15803D", width=0
         ).pack(side="left", expand=True, fill="x")
@@ -364,7 +678,7 @@ class SignLanguageApp:
         
         self.word_info_label = ctk.CTkLabel(
             self.bottom_frame,
-            text="\U0001f4dd LETTER MODE \u2014 Sign individual letters to spell words",
+            text="LETTER MODE - Sign individual letters to spell words",
             font=self.f_body, text_color=self.text_secondary
         )
         self.word_info_label.place(x=20, rely=1.0, y=-40)
@@ -458,20 +772,20 @@ class SignLanguageApp:
             self.word_recording    = False
             self.word_raw_buffer   = []
             self.word_cooldown_until = 0
-            self.conf_display.configure(text="Confidence: \u2014")
+            self.conf_display.configure(text="Confidence: -")
             self.stable_display.pack_forget()
             self.word_mode_status.pack()
             self.word_mode_status.configure(text="Show your hands to start recording")
             self.word_progress.pack(pady=(4, 0), padx=20, fill="x")
             self.word_progress.set(0)
-            self.word_info_label.configure(text=f"\U0001f91f WORD MODE \u2014 Show hands, hold sign for {self.RECORD_DURATION:.0f}s, auto-predicts")
+            self.word_info_label.configure(text=f"WORD MODE - Show hands, hold sign for {self.RECORD_DURATION:.0f}s, auto-predicts")
         else:
             self.conf_display.configure(text="Confidence: 0%")
             self.stable_display.configure(text="Stability: 0/5")
             self.word_progress.pack_forget()
             self.word_mode_status.pack_forget()
             self.stable_display.pack()
-            self.word_info_label.configure(text="\U0001f4dd LETTER MODE \u2014 Sign individual letters to spell words")
+            self.word_info_label.configure(text="LETTER MODE - Sign individual letters to spell words")
 
     def add_space(self):
         if not self.word.endswith(" "):
@@ -549,13 +863,13 @@ class SignLanguageApp:
             self.enhance_btn.configure(
                 state="normal",
                 fg_color=self.accent_primary,
-                text="\U0001fa84 Enhance Syntax"
+                text="Enhance Syntax"
             )
 
     def _gec_mark_unavailable(self):
         if hasattr(self, 'enhance_btn'):
             self.enhance_btn.configure(
-                text="\U0001fa84 Enhance (basic)",
+                text="Enhance (basic)",
                 state="normal",
                 fg_color=self.card_alt
             )
@@ -606,7 +920,7 @@ class SignLanguageApp:
         # Disable button immediately; run inference in background so UI stays responsive
         if hasattr(self, 'enhance_btn'):
             self.enhance_btn.configure(state="disabled", fg_color=self.card_alt,
-                                       text="⏳ Enhancing…")
+                                       text="Enhancing...")
         raw_text = self.word.strip()
 
         def _run():
@@ -619,7 +933,7 @@ class SignLanguageApp:
                     self.enhance_btn.configure(
                         state="disabled",
                         fg_color=self.card_alt,
-                        text="\U0001fa84 Enhance Syntax"
+                        text="Enhance Syntax"
                     )
             self.root.after(0, _apply)
 
@@ -670,7 +984,7 @@ class SignLanguageApp:
     def update_video(self):
         ret, frame = self.cap.read()
         if not ret or frame is None:
-            self.video_label.configure(text="❌ Camera not found!", image="")
+            self.video_label.configure(text="Camera not found!", image="")
             self.root.after(1000, self.update_video)
             return
 
@@ -725,9 +1039,7 @@ class SignLanguageApp:
                     landmarks /= max_val
                 landmarks = landmarks.reshape(1, 63)
 
-            self.letter_interpreter.set_tensor(self.letter_input_details[0]['index'], landmarks.astype(np.float32))
-            self.letter_interpreter.invoke()
-            prediction = self.letter_interpreter.get_tensor(self.letter_output_details[0]['index']).copy()
+            prediction = self.model.predict(landmarks, verbose=0)
             self.prediction_buffer.append(prediction)
 
             avg_pred = np.mean(self.prediction_buffer, axis=0)[0]
@@ -744,7 +1056,6 @@ class SignLanguageApp:
                 else:
                     self.current_stable_letter = letter
                     self.stable_frames = 1
-
                 self.stable_display.configure(text=f"Stability: {self.stable_frames}/5")
 
                 if self.stable_frames == self.REQUIRED_FRAMES:
@@ -779,18 +1090,18 @@ class SignLanguageApp:
                 self.word_record_start = now
                 self.word_raw_buffer   = [features]
                 self.word_progress.set(0)
-                self.word_mode_status.configure(text=f"🔴 Recording… 0.0 / {self.RECORD_DURATION:.1f}s")
+                self.word_mode_status.configure(text=f"Recording... 0.0 / {self.RECORD_DURATION:.1f}s")
             else:
                 self.word_progress.set(0)
                 self.word_mode_status.configure(text="Show your hands to start recording")
-                self.conf_display.configure(text="Confidence: —")
+                self.conf_display.configure(text="Confidence: -")
                 self.draw_confidence_ring(0)
             return hand_result
 
         elapsed = now - self.word_record_start
         progress = min(1.0, elapsed / self.RECORD_DURATION)
         self.word_progress.set(progress)
-        self.word_mode_status.configure(text=f"🔴 Recording… {elapsed:.1f} / {self.RECORD_DURATION:.1f}s")
+        self.word_mode_status.configure(text=f"Recording... {elapsed:.1f} / {self.RECORD_DURATION:.1f}s")
 
         self.word_raw_buffer.append(features)
 
@@ -814,9 +1125,7 @@ class SignLanguageApp:
             else:
                 seq = seq.reshape(1, WORD_FRAMES, 150)
 
-            self.word_interpreter.set_tensor(self.word_input_details[0]['index'], seq.astype(np.float32))
-            self.word_interpreter.invoke()
-            probs = self.word_interpreter.get_tensor(self.word_output_details[0]['index'])[0].copy()
+            probs     = self.word_model.predict(seq, verbose=0)[0]
             class_id  = int(np.argmax(probs))
             confidence = float(probs[class_id])
             word_label = self.word_labels[str(class_id)]
@@ -836,7 +1145,7 @@ class SignLanguageApp:
             self.conf_display.configure(text=f"Confidence: {int(confidence * 100)}%")
             self.draw_confidence_ring(int(confidence * 100))
             self.word_mode_status.configure(
-                text=f"✅ {word_label}" if confidence > 0.80 else f"⚠️  {word_label} — low confidence"
+                text=f"{word_label}" if confidence > 0.80 else f"{word_label} - low confidence"
             )
             self.word_progress.set(1.0)
 
